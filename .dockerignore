@@ -1,0 +1,7 @@
+.git
+.agents
+.codex
+.cache
+*.tmp
+local-share
+local-share.exe

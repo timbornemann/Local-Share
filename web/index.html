@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Local Share</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Local Share</h1>
+          <p>Temporary files and text for this network.</p>
+        </div>
+        <div class="status" id="connectionStatus">Connecting</div>
+      </header>
+
+      <section class="compose">
+        <label class="dropzone" id="dropzone">
+          <input id="fileInput" type="file" multiple>
+          <span class="drop-title">Drop files here</span>
+          <span class="drop-subtitle">or click to choose anything from your device</span>
+        </label>
+
+        <form class="text-share" id="textForm">
+          <input id="textName" type="text" maxlength="120" placeholder="Optional text name">
+          <textarea id="textInput" rows="7" placeholder="Paste raw text"></textarea>
+          <button type="submit">Share Text</button>
+        </form>
+      </section>
+
+      <section class="list-head">
+        <h2>Available now</h2>
+        <p id="itemCount">0 items</p>
+      </section>
+
+      <section class="items" id="items" aria-live="polite">
+        <div class="empty">Nothing shared yet.</div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

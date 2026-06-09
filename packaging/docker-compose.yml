@@ -1,0 +1,9 @@
+services:
+  local-share:
+    image: __IMAGE__
+    container_name: local-share
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      LOCAL_SHARE_ADDR: ":8080"

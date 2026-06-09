@@ -1,0 +1,104 @@
+name: Release Docker Package
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: timbornemann/local-share
+
+jobs:
+  release-docker:
+    name: Build and publish Docker package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute release values
+        id: vars
+        shell: bash
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}"
+          tag="${GITHUB_REF_NAME}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.vars.outputs.tag }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Create downloadable Docker package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="local-share-${{ steps.vars.outputs.tag }}-docker"
+          image="${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}"
+
+          mkdir -p "dist/$package"
+          cp packaging/* "dist/$package/"
+          find "dist/$package" -type f -print0 | xargs -0 sed -i \
+            -e "s|__IMAGE__|$image|g" \
+            -e "s|__TAG__|${{ steps.vars.outputs.tag }}|g"
+          chmod +x "dist/$package/run.sh"
+
+          (cd dist && zip -r "$package.zip" "$package")
+          (cd dist && tar -czf "$package.tar.gz" "$package")
+
+      - name: Attach Docker package to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+
+      - name: Write job summary
+        shell: bash
+        run: |
+          {
+            echo "## Local Share Docker release"
+            echo ""
+            echo "- Image: \`${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}\`"
+            echo "- Package: \`local-share-${{ steps.vars.outputs.tag }}-docker.zip\`"
+            echo ""
+            echo "Run directly with:"
+            echo ""
+            echo "\`\`\`sh"
+            echo "docker run --rm -p 8080:8080 ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
