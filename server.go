@@ -52,6 +52,8 @@ type itemDTO struct {
 	Name        string    `json:"name"`
 	Size        int64     `json:"size"`
 	ContentType string    `json:"contentType"`
+	Previewable bool      `json:"previewable"`
+	PreviewKind string    `json:"previewKind"`
 	CreatedAt   time.Time `json:"createdAt"`
 	ExpiresAt   time.Time `json:"expiresAt"`
 }
@@ -141,7 +143,7 @@ func (s *Server) RunCleanup(ctx context.Context) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/items/") {
 		http.NotFound(w, r)
 		return
 	}
@@ -268,6 +270,19 @@ func (s *Server) handleItemAction(w http.ResponseWriter, r *http.Request) {
 	}
 	id := parts[0]
 
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		if s.cleanupExpired() {
+			s.broadcast("expired")
+		}
+		it, ok := s.getActiveItem(id)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, toDTO(it))
+		return
+	}
+
 	if len(parts) == 1 && r.Method == http.MethodDelete {
 		if s.cleanupExpired() {
 			s.broadcast("expired")
@@ -291,6 +306,11 @@ func (s *Server) handleItemAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "view" && r.Method == http.MethodGet {
+		s.handleView(w, r, id)
+		return
+	}
+
 	http.NotFound(w, r)
 }
 
@@ -304,8 +324,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, id strin
 		http.NotFound(w, r)
 		return
 	}
-	if !attachment && it.Kind != kindText {
-		http.NotFound(w, r)
+	if !attachment && !isTextPreviewable(it) {
+		http.Error(w, "preview is not available for this file type", http.StatusUnsupportedMediaType)
 		return
 	}
 
@@ -320,6 +340,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, id strin
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	if !attachment {
+		contentType = "text/plain; charset=utf-8"
+	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", it.Size))
 	if attachment {
@@ -327,6 +350,41 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, id strin
 			"filename": cleanDisplayName(it.Name, "download"),
 		}))
 	}
+	http.ServeContent(w, r, it.Name, it.CreatedAt, file)
+}
+
+func (s *Server) handleView(w http.ResponseWriter, r *http.Request, id string) {
+	if s.cleanupExpired() {
+		s.broadcast("expired")
+	}
+
+	it, ok := s.getActiveItem(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	kind := previewKindFor(it)
+	if kind == "" {
+		http.Error(w, "preview is not available for this file type", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	file, err := os.Open(it.Path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+
+	contentType := it.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if kind == "text" {
+		contentType = "text/plain; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", it.Size))
 	http.ServeContent(w, r, it.Name, it.CreatedAt, file)
 }
 
@@ -479,14 +537,83 @@ func (s *Server) broadcast(reason string) {
 }
 
 func toDTO(it *item) itemDTO {
+	previewKind := previewKindFor(it)
 	return itemDTO{
 		ID:          it.ID,
 		Kind:        it.Kind,
 		Name:        it.Name,
 		Size:        it.Size,
 		ContentType: it.ContentType,
+		Previewable: previewKind != "",
+		PreviewKind: previewKind,
 		CreatedAt:   it.CreatedAt,
 		ExpiresAt:   it.ExpiresAt,
+	}
+}
+
+func isTextPreviewable(it *item) bool {
+	return previewKindFor(it) == "text"
+}
+
+func previewKindFor(it *item) string {
+	if it == nil {
+		return ""
+	}
+	if it.Kind == kindText {
+		return "text"
+	}
+
+	mediaType, _, err := mime.ParseMediaType(it.ContentType)
+	if err == nil {
+		mediaType = strings.ToLower(mediaType)
+		if strings.HasPrefix(mediaType, "text/") {
+			return "text"
+		}
+		switch {
+		case strings.HasPrefix(mediaType, "image/"):
+			return "image"
+		case strings.HasPrefix(mediaType, "audio/"):
+			return "audio"
+		case strings.HasPrefix(mediaType, "video/"):
+			return "video"
+		case mediaType == "application/pdf":
+			return "pdf"
+		}
+		switch mediaType {
+		case "application/json", "application/xml", "application/yaml", "application/x-yaml",
+			"application/toml", "application/javascript", "application/ecmascript",
+			"application/x-javascript", "application/sql", "application/graphql":
+			return "text"
+		}
+		if strings.HasSuffix(mediaType, "+json") || strings.HasSuffix(mediaType, "+xml") {
+			return "text"
+		}
+	}
+
+	name := strings.ToLower(it.Name)
+	if name == "dockerfile" || name == "makefile" || name == ".env" {
+		return "text"
+	}
+	switch filepath.Ext(name) {
+	case ".txt", ".text", ".md", ".markdown", ".log", ".csv", ".tsv",
+		".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".ini", ".env",
+		".html", ".htm", ".css", ".scss", ".sass", ".less",
+		".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+		".go", ".rs", ".py", ".rb", ".php", ".java", ".kt", ".kts", ".swift",
+		".c", ".h", ".cpp", ".hpp", ".cc", ".cs", ".fs", ".fsx",
+		".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
+		".sql", ".graphql", ".gql", ".dockerignore", ".gitignore":
+		return "text"
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif", ".svg":
+		return "image"
+	case ".pdf":
+		return "pdf"
+	case ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac":
+		return "audio"
+	case ".mp4", ".webm", ".mov", ".m4v", ".ogv":
+		return "video"
+	default:
+		return ""
 	}
 }
 

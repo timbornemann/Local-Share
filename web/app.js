@@ -1,10 +1,14 @@
 const state = {
   items: [],
+  activeItem: null,
+  activePreviewText: "",
   busy: false,
 };
 
 const els = {
   connectionStatus: document.querySelector("#connectionStatus"),
+  composeView: document.querySelector("#composeView"),
+  listHead: document.querySelector("#listHead"),
   dropzone: document.querySelector("#dropzone"),
   fileInput: document.querySelector("#fileInput"),
   textForm: document.querySelector("#textForm"),
@@ -12,6 +16,13 @@ const els = {
   textInput: document.querySelector("#textInput"),
   items: document.querySelector("#items"),
   itemCount: document.querySelector("#itemCount"),
+  detailView: document.querySelector("#detailView"),
+  detailActions: document.querySelector("#detailActions"),
+  detailBadge: document.querySelector("#detailBadge"),
+  detailName: document.querySelector("#detailName"),
+  detailMeta: document.querySelector("#detailMeta"),
+  previewArea: document.querySelector("#previewArea"),
+  backButton: document.querySelector("#backButton"),
   toast: document.querySelector("#toast"),
 };
 
@@ -50,6 +61,16 @@ function renderItem(item) {
   const row = document.createElement("article");
   row.className = "item";
   row.dataset.id = item.id;
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `Open ${item.name}`);
+  row.addEventListener("click", () => openDetail(item.id));
+  row.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openDetail(item.id);
+    }
+  });
 
   const main = document.createElement("div");
   main.className = "item-main";
@@ -69,43 +90,202 @@ function renderItem(item) {
 
   const meta = document.createElement("div");
   meta.className = "item-meta";
-  meta.append(metaPart(formatBytes(item.size)), metaPart(timeLeft(item.expiresAt)));
+  renderMeta(meta, item);
 
   main.append(title, meta);
 
   const actions = document.createElement("div");
   actions.className = "item-actions";
+  actions.addEventListener("click", event => event.stopPropagation());
+  actions.addEventListener("keydown", event => event.stopPropagation());
 
-  if (item.kind === "text") {
-    const copy = document.createElement("button");
-    copy.className = "secondary";
-    copy.type = "button";
-    copy.textContent = "Copy";
-    copy.addEventListener("click", () => copyText(item.id));
-    actions.append(copy);
+  if (item.previewKind === "text") {
+    actions.append(actionButton("Copy", "secondary", () => copyItemText(item.id)));
   }
 
-  const download = document.createElement("a");
-  download.className = "button-link secondary";
-  download.href = `/api/items/${encodeURIComponent(item.id)}/download`;
-  download.textContent = "Download";
-  actions.append(download);
-
-  const del = document.createElement("button");
-  del.className = "danger";
-  del.type = "button";
-  del.textContent = "Delete";
-  del.addEventListener("click", () => deleteItem(item.id));
-  actions.append(del);
+  actions.append(downloadLink(item, "secondary"));
+  actions.append(actionButton("Delete", "danger", () => deleteItem(item.id)));
 
   row.append(main, actions);
   return row;
+}
+
+function renderMeta(container, item) {
+  container.replaceChildren(
+    metaPart(formatBytes(item.size)),
+    metaPart(timeLeft(item.expiresAt)),
+    metaPart(item.contentType || "unknown type"),
+  );
 }
 
 function metaPart(text) {
   const span = document.createElement("span");
   span.textContent = text;
   return span;
+}
+
+function actionButton(label, className, onClick) {
+  const button = document.createElement("button");
+  button.className = className;
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
+function downloadLink(item, className) {
+  const link = document.createElement("a");
+  link.className = `button-link ${className || ""}`.trim();
+  link.href = `/api/items/${encodeURIComponent(item.id)}/download`;
+  link.download = item.name;
+  link.textContent = "Download";
+  link.addEventListener("click", event => event.stopPropagation());
+  return link;
+}
+
+function currentDetailID() {
+  const match = window.location.pathname.match(/^\/items\/([^/]+)$/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function setMode(mode) {
+  const isDetail = mode === "detail";
+  els.composeView.hidden = isDetail;
+  els.listHead.hidden = isDetail;
+  els.items.hidden = isDetail;
+  els.detailView.hidden = !isDetail;
+}
+
+function openDetail(id) {
+  window.history.pushState({}, "", `/items/${encodeURIComponent(id)}`);
+  renderRoute();
+}
+
+function openHome() {
+  window.history.pushState({}, "", "/");
+  renderRoute();
+}
+
+async function renderRoute() {
+  const id = currentDetailID();
+  if (!id) {
+    state.activeItem = null;
+    state.activePreviewText = "";
+    setMode("home");
+    return;
+  }
+
+  setMode("detail");
+  await loadDetail(id);
+}
+
+async function loadDetail(id) {
+  state.activeItem = null;
+  state.activePreviewText = "";
+  els.detailActions.replaceChildren();
+  els.detailBadge.className = "badge";
+  els.detailBadge.textContent = "item";
+  els.detailName.textContent = "Loading";
+  els.detailMeta.replaceChildren();
+  renderPreviewMessage("Loading preview...");
+
+  try {
+    const res = await fetch(`/api/items/${encodeURIComponent(id)}`);
+    if (res.status === 404) {
+      renderMissingDetail();
+      return;
+    }
+    if (!res.ok) throw new Error(await res.text());
+    const item = await res.json();
+    state.activeItem = item;
+    renderDetail(item);
+    await renderPreview(item);
+  } catch (err) {
+    renderPreviewMessage(cleanError(err));
+  }
+}
+
+function renderMissingDetail() {
+  els.detailName.textContent = "Item unavailable";
+  els.detailBadge.textContent = "gone";
+  els.detailMeta.replaceChildren(metaPart("It may have expired or been deleted."));
+  els.detailActions.replaceChildren();
+  renderPreviewMessage("This item is no longer available.");
+}
+
+function renderDetail(item) {
+  els.detailBadge.className = `badge ${item.kind}`;
+  els.detailBadge.textContent = item.kind;
+  els.detailName.textContent = item.name;
+  renderMeta(els.detailMeta, item);
+
+  const actions = [];
+  if (item.previewKind === "text") {
+    actions.push(actionButton("Copy", "secondary", () => copyItemText(item.id)));
+  }
+  actions.push(downloadLink(item, "secondary"));
+  actions.push(actionButton("Delete", "danger", () => deleteItem(item.id, { returnHome: true })));
+  els.detailActions.replaceChildren(...actions);
+}
+
+async function renderPreview(item) {
+  if (item.previewKind === "text") {
+    const res = await fetch(`/api/items/${encodeURIComponent(item.id)}/raw`);
+    if (!res.ok) throw new Error(await res.text());
+    const text = await res.text();
+    state.activePreviewText = text;
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    code.textContent = text;
+    pre.append(code);
+    els.previewArea.replaceChildren(pre);
+    return;
+  }
+
+  if (item.previewKind === "image") {
+    const img = document.createElement("img");
+    img.src = `/api/items/${encodeURIComponent(item.id)}/view`;
+    img.alt = item.name;
+    els.previewArea.replaceChildren(img);
+    return;
+  }
+
+  if (item.previewKind === "pdf") {
+    const frame = document.createElement("iframe");
+    frame.title = item.name;
+    frame.src = `/api/items/${encodeURIComponent(item.id)}/view`;
+    els.previewArea.replaceChildren(frame);
+    return;
+  }
+
+  if (item.previewKind === "audio") {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.src = `/api/items/${encodeURIComponent(item.id)}/view`;
+    els.previewArea.replaceChildren(audio);
+    return;
+  }
+
+  if (item.previewKind === "video") {
+    const video = document.createElement("video");
+    video.controls = true;
+    video.src = `/api/items/${encodeURIComponent(item.id)}/view`;
+    els.previewArea.replaceChildren(video);
+    return;
+  }
+
+  renderPreviewMessage("No browser preview is available for this file type. Download it to open it locally.");
+}
+
+function renderPreviewMessage(message) {
+  const box = document.createElement("div");
+  box.className = "preview-message";
+  box.textContent = message;
+  els.previewArea.replaceChildren(box);
 }
 
 function formatBytes(bytes) {
@@ -173,44 +353,89 @@ async function shareText(event) {
   }
 }
 
-async function copyText(id) {
+async function copyItemText(id) {
   try {
-    const res = await fetch(`/api/items/${encodeURIComponent(id)}/raw`);
-    if (!res.ok) throw new Error(await res.text());
-    const text = await res.text();
-    await navigator.clipboard.writeText(text);
+    let text = "";
+    if (state.activeItem && state.activeItem.id === id && state.activePreviewText) {
+      text = state.activePreviewText;
+    } else {
+      const res = await fetch(`/api/items/${encodeURIComponent(id)}/raw`);
+      if (!res.ok) throw new Error(await res.text());
+      text = await res.text();
+    }
+    await copyToClipboard(text);
     toast("Copied");
   } catch (err) {
     toast(cleanError(err));
   }
 }
 
-async function deleteItem(id) {
+async function copyToClipboard(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_err) {
+      // Fall through to the legacy selection-based copy path.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.append(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) {
+    throw new Error("Copy is not available in this browser");
+  }
+}
+
+async function deleteItem(id, options = {}) {
   try {
     const res = await fetch(`/api/items/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (!res.ok && res.status !== 404) throw new Error(await res.text());
     state.items = state.items.filter(item => item.id !== id);
     renderItems();
     toast("Deleted");
+    if (options.returnHome || currentDetailID() === id) {
+      openHome();
+    }
   } catch (err) {
     toast(cleanError(err));
   }
 }
 
 function cleanError(err) {
-  const message = err && err.message ? err.message.trim() : "Something went wrong";
+  const message = err && err.message ? err.message.trim().replace(/\s+/g, " ") : "Something went wrong";
   return message.length > 140 ? `${message.slice(0, 137)}...` : message;
 }
 
 function connectEvents() {
   const events = new EventSource("/api/events");
   events.addEventListener("connected", () => setStatus("Live", "live"));
-  events.addEventListener("items_changed", () => loadItems().catch(() => setStatus("Offline", "offline")));
+  events.addEventListener("items_changed", async () => {
+    try {
+      await loadItems();
+      const id = currentDetailID();
+      if (id) await loadDetail(id);
+      setStatus("Live", "live");
+    } catch (_err) {
+      setStatus("Offline", "offline");
+    }
+  });
   events.onerror = () => setStatus("Reconnecting", "offline");
 }
 
 els.fileInput.addEventListener("change", event => uploadFiles(event.target.files));
 els.textForm.addEventListener("submit", shareText);
+els.backButton.addEventListener("click", openHome);
+window.addEventListener("popstate", renderRoute);
 
 ["dragenter", "dragover"].forEach(type => {
   els.dropzone.addEventListener(type, event => {
@@ -228,6 +453,13 @@ els.textForm.addEventListener("submit", shareText);
 
 els.dropzone.addEventListener("drop", event => uploadFiles(event.dataTransfer.files));
 
-setInterval(renderItems, 1000);
-loadItems().then(() => setStatus("Live", "live")).catch(() => setStatus("Offline", "offline"));
+setInterval(() => {
+  renderItems();
+  if (state.activeItem) renderMeta(els.detailMeta, state.activeItem);
+}, 1000);
+
+loadItems()
+  .then(renderRoute)
+  .then(() => setStatus("Live", "live"))
+  .catch(() => setStatus("Offline", "offline"));
 connectEvents();

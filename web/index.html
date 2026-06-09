@@ -16,7 +16,7 @@
         <div class="status" id="connectionStatus">Connecting</div>
       </header>
 
-      <section class="compose">
+      <section class="compose" id="composeView">
         <label class="dropzone" id="dropzone">
           <input id="fileInput" type="file" multiple>
           <span class="drop-title">Drop files here</span>
@@ -30,7 +30,20 @@
         </form>
       </section>
 
-      <section class="list-head">
+      <section class="detail" id="detailView" hidden>
+        <div class="detail-bar">
+          <button type="button" class="secondary" id="backButton">Back</button>
+          <div class="detail-actions" id="detailActions"></div>
+        </div>
+        <div class="detail-title">
+          <span class="badge" id="detailBadge">item</span>
+          <h2 id="detailName">Loading</h2>
+        </div>
+        <div class="item-meta detail-meta" id="detailMeta"></div>
+        <div class="preview" id="previewArea"></div>
+      </section>
+
+      <section class="list-head" id="listHead">
         <h2>Available now</h2>
         <p id="itemCount">0 items</p>
       </section>

@@ -30,6 +30,10 @@ textarea {
   font: inherit;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .shell {
   width: min(1120px, calc(100% - 32px));
   margin: 0 auto;
@@ -231,6 +235,13 @@ button.danger {
   gap: 16px;
   align-items: center;
   padding: 14px;
+  cursor: pointer;
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+
+.item:hover {
+  border-color: #b7c6bb;
+  transform: translateY(-1px);
 }
 
 .item-main {
@@ -282,6 +293,96 @@ button.danger {
   gap: 8px;
 }
 
+.detail {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+
+.detail-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.detail-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.detail-title h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.detail-meta {
+  margin: 10px 0 16px;
+}
+
+.preview {
+  min-height: 280px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+  overflow: hidden;
+}
+
+.preview pre {
+  min-height: 280px;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #111827;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.preview img,
+.preview iframe,
+.preview video {
+  display: block;
+  width: 100%;
+  min-height: 420px;
+  border: 0;
+  background: #fff;
+}
+
+.preview img {
+  max-height: 70vh;
+  object-fit: contain;
+  padding: 12px;
+}
+
+.preview audio {
+  width: calc(100% - 32px);
+  margin: 16px;
+}
+
+.preview-message {
+  display: grid;
+  place-items: center;
+  min-height: 280px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
 .toast {
   position: fixed;
   right: 18px;
@@ -311,6 +412,7 @@ button.danger {
 
   .topbar,
   .list-head,
+  .detail-bar,
   .item {
     display: grid;
   }
@@ -323,7 +425,15 @@ button.danger {
     justify-content: stretch;
   }
 
+  .detail-actions {
+    justify-content: stretch;
+  }
+
   .item-actions > * {
+    flex: 1 1 120px;
+  }
+
+  .detail-actions > * {
     flex: 1 1 120px;
   }
 }

@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"os"
 	"strings"
 	"testing"
@@ -92,6 +94,9 @@ func TestTextShareRawAndDownload(t *testing.T) {
 	if created.Kind != kindText || created.Name != "note.txt" || created.Size != int64(len(text)) {
 		t.Fatalf("unexpected metadata: %+v", created)
 	}
+	if !created.Previewable || created.PreviewKind != "text" {
+		t.Fatalf("text item should be previewable: %+v", created)
+	}
 
 	for _, route := range []string{"/raw", "/download"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/items/"+created.ID+route, nil)
@@ -103,6 +108,131 @@ func TestTextShareRawAndDownload(t *testing.T) {
 		if rec.Body.String() != text {
 			t.Fatalf("%s body mismatch: %q", route, rec.Body.String())
 		}
+	}
+}
+
+func TestGetItemMetadata(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	created := createText(t, handler, "metadata", "details")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/"+created.ID, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metadata status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got itemDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if got.ID != created.ID || got.Name != "metadata" || !got.Previewable {
+		t.Fatalf("unexpected metadata: %+v", got)
+	}
+}
+
+func TestCodeFileCanBePreviewedRaw(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	source := []byte("package main\n\nfunc main() {}\n")
+	created := uploadFiles(t, handler, map[string][]byte{"main.go": source})
+	if len(created) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(created))
+	}
+	if !created[0].Previewable || created[0].PreviewKind != "text" {
+		t.Fatalf("code file should be previewable: %+v", created[0])
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/"+created[0].ID+"/raw", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("raw preview status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != string(source) {
+		t.Fatalf("raw preview mismatch: %q", rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("raw preview content type = %q", got)
+	}
+}
+
+func TestUnsupportedFileRawPreviewReturns415(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	created := uploadFiles(t, handler, map[string][]byte{"slides.pptx": []byte("not really pptx")})
+	if len(created) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(created))
+	}
+	if created[0].Previewable {
+		t.Fatalf("pptx should not be previewable: %+v", created[0])
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/"+created[0].ID+"/raw", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("raw preview status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOfficeContentTypeIsNotTextPreviewable(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	created := uploadFileWithContentType(
+		t,
+		handler,
+		"slides.pptx",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		[]byte("pptx-ish"),
+	)
+	if created.Previewable || created.PreviewKind != "" {
+		t.Fatalf("office file should not be previewable: %+v", created)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/"+created.ID+"/raw", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("raw preview status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestImageFileCanBeViewedInline(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	imageBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	created := uploadFiles(t, handler, map[string][]byte{"image.png": imageBytes})
+	if len(created) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(created))
+	}
+	if !created[0].Previewable || created[0].PreviewKind != "image" {
+		t.Fatalf("png should be image-previewable: %+v", created[0])
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/"+created[0].ID+"/view", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inline view status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), imageBytes) {
+		t.Fatalf("inline view body mismatch: %v", rec.Body.Bytes())
+	}
+}
+
+func TestItemDetailRouteServesApp(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	req := httptest.NewRequest(http.MethodGet, "/items/some-id", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail route status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Local Share") {
+		t.Fatalf("detail route should serve the app shell")
 	}
 }
 
@@ -217,6 +347,42 @@ func uploadFiles(t *testing.T, handler http.Handler, files map[string][]byte) []
 		t.Fatalf("decode upload response: %v", err)
 	}
 	return created
+}
+
+func uploadFileWithContentType(t *testing.T, handler http.Handler, name, contentType string, content []byte) itemDTO {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="files"; filename="%s"`, name))
+	header.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		t.Fatalf("CreatePart: %v", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatalf("write part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/items/files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var created []itemDTO
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if len(created) != 1 {
+		t.Fatalf("expected 1 uploaded item, got %d", len(created))
+	}
+	return created[0]
 }
 
 func createText(t *testing.T, handler http.Handler, name, text string) itemDTO {

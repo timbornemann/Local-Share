@@ -54,10 +54,12 @@ or:
 
 - `GET /` opens the browser UI.
 - `GET /api/items` lists active shares.
+- `GET /api/items/{id}` returns metadata for one active share.
 - `POST /api/items/files` accepts multipart uploads with repeated `files` fields.
 - `POST /api/items/text` accepts JSON: `{ "text": "...", "name": "optional" }`.
 - `GET /api/items/{id}/download` downloads a file or text item.
-- `GET /api/items/{id}/raw` returns text items as `text/plain`.
+- `GET /api/items/{id}/raw` returns text shares and text/code files as `text/plain`.
+- `GET /api/items/{id}/view` streams browser-previewable files inline.
 - `DELETE /api/items/{id}` removes an item.
 - `GET /api/events` streams Server-Sent Events when the list changes.
 
