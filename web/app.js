@@ -2,11 +2,13 @@ const state = {
   items: [],
   activeItem: null,
   activePreviewText: "",
+  composeTab: "files",
   busy: false,
 };
 
 const els = {
   connectionStatus: document.querySelector("#connectionStatus"),
+  composeTabs: document.querySelector("#composeTabs"),
   composeView: document.querySelector("#composeView"),
   listHead: document.querySelector("#listHead"),
   dropzone: document.querySelector("#dropzone"),
@@ -112,14 +114,15 @@ function renderItem(item) {
 
 function renderMeta(container, item) {
   container.replaceChildren(
-    metaPart(formatBytes(item.size)),
-    metaPart(timeLeft(item.expiresAt)),
-    metaPart(item.contentType || "unknown type"),
+    metaPart(formatBytes(item.size), "meta-size"),
+    metaPart(timeLeft(item.expiresAt), "meta-expiry"),
+    metaPart(item.contentType || "unknown type", "meta-type"),
   );
 }
 
-function metaPart(text) {
+function metaPart(text, className = "") {
   const span = document.createElement("span");
+  span.className = className;
   span.textContent = text;
   return span;
 }
@@ -154,10 +157,29 @@ function currentDetailID() {
 
 function setMode(mode) {
   const isDetail = mode === "detail";
+  els.composeTabs.hidden = isDetail;
   els.composeView.hidden = isDetail;
   els.listHead.hidden = isDetail;
   els.items.hidden = isDetail;
   els.detailView.hidden = !isDetail;
+}
+
+const mobileLayout = window.matchMedia("(max-width: 760px)");
+
+function setComposeTab(tab) {
+  state.composeTab = tab;
+  els.composeTabs.querySelectorAll("[data-compose-tab]").forEach(button => {
+    const active = button.dataset.composeTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  syncComposePanels();
+}
+
+function syncComposePanels() {
+  document.querySelectorAll("[data-compose-panel]").forEach(panel => {
+    panel.hidden = mobileLayout.matches && panel.dataset.composePanel !== state.composeTab;
+  });
 }
 
 function openDetail(id) {
@@ -436,6 +458,14 @@ els.fileInput.addEventListener("change", event => uploadFiles(event.target.files
 els.textForm.addEventListener("submit", shareText);
 els.backButton.addEventListener("click", openHome);
 window.addEventListener("popstate", renderRoute);
+if (typeof mobileLayout.addEventListener === "function") {
+  mobileLayout.addEventListener("change", syncComposePanels);
+} else {
+  mobileLayout.addListener(syncComposePanels);
+}
+els.composeTabs.querySelectorAll("[data-compose-tab]").forEach(button => {
+  button.addEventListener("click", () => setComposeTab(button.dataset.composeTab));
+});
 
 ["dragenter", "dragover"].forEach(type => {
   els.dropzone.addEventListener(type, event => {
@@ -458,6 +488,7 @@ setInterval(() => {
   if (state.activeItem) renderMeta(els.detailMeta, state.activeItem);
 }, 1000);
 
+setComposeTab(state.composeTab);
 loadItems()
   .then(renderRoute)
   .then(() => setStatus("Live", "live"))

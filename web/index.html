@@ -2,7 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f7f8f4">
     <title>Local Share</title>
     <link rel="stylesheet" href="/static/styles.css">
   </head>
@@ -16,14 +17,19 @@
         <div class="status" id="connectionStatus">Connecting</div>
       </header>
 
+      <div class="compose-tabs" id="composeTabs" aria-label="Share type">
+        <button type="button" class="active" data-compose-tab="files">Files</button>
+        <button type="button" data-compose-tab="text">Text</button>
+      </div>
+
       <section class="compose" id="composeView">
-        <label class="dropzone" id="dropzone">
+        <label class="dropzone" id="dropzone" data-compose-panel="files">
           <input id="fileInput" type="file" multiple>
-          <span class="drop-title">Drop files here</span>
-          <span class="drop-subtitle">or click to choose anything from your device</span>
+          <span class="drop-title">Choose files</span>
+          <span class="drop-subtitle">Tap, click, or drop anything from your device</span>
         </label>
 
-        <form class="text-share" id="textForm">
+        <form class="text-share" id="textForm" data-compose-panel="text">
           <input id="textName" type="text" maxlength="120" placeholder="Optional text name">
           <textarea id="textInput" rows="7" placeholder="Paste raw text"></textarea>
           <button type="submit">Share Text</button>
