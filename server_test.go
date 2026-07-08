@@ -111,6 +111,117 @@ func TestTextShareRawAndDownload(t *testing.T) {
 	}
 }
 
+func TestProtectedTextRequiresUnlockForRawViewAndDownload(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	text := "secret clipboard value"
+
+	created := createTextWithOptions(t, handler, "secret.txt", text, 90, "open-sesame")
+	if !created.Protected {
+		t.Fatalf("text item should be protected: %+v", created)
+	}
+	if got := created.ExpiresAt.Sub(created.CreatedAt); got != 90*time.Second {
+		t.Fatalf("custom ttl = %s, want 90s", got)
+	}
+
+	for _, route := range []string{"/raw", "/view", "/download"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/items/"+created.ID+route, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without token status = %d, body = %s", route, rec.Code, rec.Body.String())
+		}
+	}
+
+	unlockItemForTest(t, handler, created.ID, "wrong-password", http.StatusUnauthorized)
+	unlocked := unlockItemForTest(t, handler, created.ID, "open-sesame", http.StatusOK)
+	if unlocked.Token == "" {
+		t.Fatalf("unlock response should include a token")
+	}
+	if !unlocked.ExpiresAt.Equal(created.ExpiresAt) {
+		t.Fatalf("unlock expiry = %s, want item expiry %s", unlocked.ExpiresAt, created.ExpiresAt)
+	}
+
+	for _, route := range []string{"/raw", "/view", "/download"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/items/"+created.ID+route+"?token="+unlocked.Token, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s with token status = %d, body = %s", route, rec.Code, rec.Body.String())
+		}
+		if rec.Body.String() != text {
+			t.Fatalf("%s body mismatch: %q", route, rec.Body.String())
+		}
+	}
+}
+
+func TestProtectedFileDownloadRequiresUnlock(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	payload := []byte{0x50, 0x51, 0x52, 0x00}
+
+	created := uploadFilesWithOptions(t, handler, map[string][]byte{"secret.bin": payload}, testUploadOptions{
+		TTLSeconds: 120,
+		Password:   "download-me",
+	})
+	if len(created) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(created))
+	}
+	if !created[0].Protected {
+		t.Fatalf("file item should be protected: %+v", created[0])
+	}
+	if got := created[0].ExpiresAt.Sub(created[0].CreatedAt); got != 120*time.Second {
+		t.Fatalf("custom ttl = %s, want 120s", got)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/"+created[0].ID+"/download", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("download without token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	unlocked := unlockItemForTest(t, handler, created[0].ID, "download-me", http.StatusOK)
+	req = httptest.NewRequest(http.MethodGet, "/api/items/"+created[0].ID+"/download?token="+unlocked.Token, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download with token status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), payload) {
+		t.Fatalf("download body mismatch: %v", rec.Body.Bytes())
+	}
+}
+
+func TestCustomTTLExpiresItem(t *testing.T) {
+	srv, clock := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	created := createTextWithOptions(t, handler, "short", "brief", 30, "")
+
+	clock.Advance(31 * time.Second)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items/"+created.ID+"/download", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("download after custom ttl status = %d", rec.Code)
+	}
+}
+
+func TestInvalidTTLIsRejected(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+
+	reqBody := strings.NewReader(`{"name":"too-long","text":"x","ttlSeconds":86401}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/items/text", reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid ttl status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetItemMetadata(t *testing.T) {
 	srv, _ := newTestServer(t, 5*time.Minute)
 	handler := srv.Routes()
@@ -317,10 +428,30 @@ func TestSSEEmitsItemChange(t *testing.T) {
 	waitForEvent(t, events, "items_changed")
 }
 
+type testUploadOptions struct {
+	TTLSeconds int64
+	Password   string
+}
+
 func uploadFiles(t *testing.T, handler http.Handler, files map[string][]byte) []itemDTO {
+	t.Helper()
+	return uploadFilesWithOptions(t, handler, files, testUploadOptions{})
+}
+
+func uploadFilesWithOptions(t *testing.T, handler http.Handler, files map[string][]byte, options testUploadOptions) []itemDTO {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	if options.TTLSeconds > 0 {
+		if err := writer.WriteField("ttlSeconds", fmt.Sprintf("%d", options.TTLSeconds)); err != nil {
+			t.Fatalf("write ttl field: %v", err)
+		}
+	}
+	if options.Password != "" {
+		if err := writer.WriteField("password", options.Password); err != nil {
+			t.Fatalf("write password field: %v", err)
+		}
+	}
 	for name, content := range files {
 		part, err := writer.CreateFormFile("files", name)
 		if err != nil {
@@ -387,7 +518,18 @@ func uploadFileWithContentType(t *testing.T, handler http.Handler, name, content
 
 func createText(t *testing.T, handler http.Handler, name, text string) itemDTO {
 	t.Helper()
-	reqBody := strings.NewReader(`{"name":` + quote(name) + `,"text":` + quote(text) + `}`)
+	return createTextWithOptions(t, handler, name, text, 0, "")
+}
+
+func createTextWithOptions(t *testing.T, handler http.Handler, name, text string, ttlSeconds int64, password string) itemDTO {
+	t.Helper()
+	reqBody := strings.NewReader(
+		`{"name":` + quote(name) +
+			`,"text":` + quote(text) +
+			`,"ttlSeconds":` + fmt.Sprintf("%d", ttlSeconds) +
+			`,"password":` + quote(password) +
+			`}`,
+	)
 	req := httptest.NewRequest(http.MethodPost, "/api/items/text", reqBody)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -401,6 +543,31 @@ func createText(t *testing.T, handler http.Handler, name, text string) itemDTO {
 		t.Fatalf("decode text response: %v", err)
 	}
 	return created
+}
+
+type unlockResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+func unlockItemForTest(t *testing.T, handler http.Handler, id, password string, wantStatus int) unlockResponse {
+	t.Helper()
+	reqBody := strings.NewReader(`{"password":` + quote(password) + `}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/items/"+id+"/unlock", reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != wantStatus {
+		t.Fatalf("unlock status = %d, want %d, body = %s", rec.Code, wantStatus, rec.Body.String())
+	}
+	if wantStatus != http.StatusOK {
+		return unlockResponse{}
+	}
+	var unlocked unlockResponse
+	if err := json.NewDecoder(rec.Body).Decode(&unlocked); err != nil {
+		t.Fatalf("decode unlock response: %v", err)
+	}
+	return unlocked
 }
 
 func createTextHTTP(t *testing.T, baseURL, name, text string) itemDTO {

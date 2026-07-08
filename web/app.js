@@ -1,9 +1,13 @@
+const DEFAULT_TTL_MINUTES = 5;
+const MAX_TTL_MINUTES = 1440;
+
 const state = {
   items: [],
   activeItem: null,
   activePreviewText: "",
   composeTab: "files",
   busy: false,
+  tokens: new Map(),
 };
 
 const els = {
@@ -13,9 +17,13 @@ const els = {
   listHead: document.querySelector("#listHead"),
   dropzone: document.querySelector("#dropzone"),
   fileInput: document.querySelector("#fileInput"),
+  fileTTL: document.querySelector("#fileTTL"),
+  filePassword: document.querySelector("#filePassword"),
   textForm: document.querySelector("#textForm"),
   textName: document.querySelector("#textName"),
   textInput: document.querySelector("#textInput"),
+  textTTL: document.querySelector("#textTTL"),
+  textPassword: document.querySelector("#textPassword"),
   items: document.querySelector("#items"),
   itemCount: document.querySelector("#itemCount"),
   detailView: document.querySelector("#detailView"),
@@ -44,6 +52,10 @@ async function loadItems() {
   const res = await fetch("/api/items");
   if (!res.ok) throw new Error("Could not load items");
   state.items = await res.json();
+  const activeIDs = new Set(state.items.map(item => item.id));
+  Array.from(state.tokens.keys()).forEach(id => {
+    if (!activeIDs.has(id)) state.tokens.delete(id);
+  });
   renderItems();
 }
 
@@ -101,11 +113,14 @@ function renderItem(item) {
   actions.addEventListener("click", event => event.stopPropagation());
   actions.addEventListener("keydown", event => event.stopPropagation());
 
-  if (item.previewKind === "text") {
-    actions.append(actionButton("Copy", "secondary", () => copyItemText(item.id)));
+  if (hasAccess(item)) {
+    if (item.previewKind === "text") {
+      actions.append(actionButton("Copy", "secondary", () => copyItemText(item.id)));
+    }
+    actions.append(downloadLink(item, "secondary"));
+  } else {
+    actions.append(actionButton("Unlock", "secondary", () => openDetail(item.id)));
   }
-
-  actions.append(downloadLink(item, "secondary"));
   actions.append(actionButton("Delete", "danger", () => deleteItem(item.id)));
 
   row.append(main, actions);
@@ -113,11 +128,23 @@ function renderItem(item) {
 }
 
 function renderMeta(container, item) {
-  container.replaceChildren(
+  if (item.protected && !hasAccess(item)) {
+    container.replaceChildren(
+      metaPart("password protected", "meta-lock"),
+      metaPart(timeLeft(item.expiresAt), "meta-expiry"),
+    );
+    return;
+  }
+
+  const parts = [
     metaPart(formatBytes(item.size), "meta-size"),
     metaPart(timeLeft(item.expiresAt), "meta-expiry"),
-    metaPart(item.contentType || "unknown type", "meta-type"),
-  );
+  ];
+  if (item.protected) {
+    parts.push(metaPart("unlocked", "meta-lock"));
+  }
+  parts.push(metaPart(item.contentType || "unknown type", "meta-type"));
+  container.replaceChildren(...parts);
 }
 
 function metaPart(text, className = "") {
@@ -143,11 +170,26 @@ function actionButton(label, className, onClick) {
 function downloadLink(item, className) {
   const link = document.createElement("a");
   link.className = `button-link ${className || ""}`.trim();
-  link.href = `/api/items/${encodeURIComponent(item.id)}/download`;
+  link.href = itemURL(item, "download");
   link.download = item.name;
   link.textContent = "Download";
   link.addEventListener("click", event => event.stopPropagation());
   return link;
+}
+
+function itemURL(item, action) {
+  const base = `/api/items/${encodeURIComponent(item.id)}/${action}`;
+  const token = state.tokens.get(item.id);
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+function hasAccess(item) {
+  return !item.protected || state.tokens.has(item.id);
+}
+
+function knownItem(id) {
+  if (state.activeItem && state.activeItem.id === id) return state.activeItem;
+  return state.items.find(item => item.id === id) || { id, protected: false };
 }
 
 function currentDetailID() {
@@ -218,20 +260,25 @@ async function loadDetail(id) {
   try {
     const res = await fetch(`/api/items/${encodeURIComponent(id)}`);
     if (res.status === 404) {
-      renderMissingDetail();
+      renderMissingDetail(id);
       return;
     }
     if (!res.ok) throw new Error(await res.text());
     const item = await res.json();
     state.activeItem = item;
     renderDetail(item);
+    if (item.protected && !hasAccess(item)) {
+      renderUnlockPrompt(item);
+      return;
+    }
     await renderPreview(item);
   } catch (err) {
     renderPreviewMessage(cleanError(err));
   }
 }
 
-function renderMissingDetail() {
+function renderMissingDetail(id = currentDetailID()) {
+  state.tokens.delete(id);
   els.detailName.textContent = "Item unavailable";
   els.detailBadge.textContent = "gone";
   els.detailMeta.replaceChildren(metaPart("It may have expired or been deleted."));
@@ -246,17 +293,86 @@ function renderDetail(item) {
   renderMeta(els.detailMeta, item);
 
   const actions = [];
-  if (item.previewKind === "text") {
-    actions.push(actionButton("Copy", "secondary", () => copyItemText(item.id)));
+  if (hasAccess(item)) {
+    if (item.previewKind === "text") {
+      actions.push(actionButton("Copy", "secondary", () => copyItemText(item.id)));
+    }
+    actions.push(downloadLink(item, "secondary"));
   }
-  actions.push(downloadLink(item, "secondary"));
   actions.push(actionButton("Delete", "danger", () => deleteItem(item.id, { returnHome: true })));
   els.detailActions.replaceChildren(...actions);
 }
 
+function renderUnlockPrompt(item) {
+  const form = document.createElement("form");
+  form.className = "unlock-form";
+
+  const title = document.createElement("div");
+  title.className = "unlock-form-title";
+  title.textContent = "Password required";
+
+  const label = document.createElement("label");
+  const labelText = document.createElement("span");
+  labelText.textContent = "Password";
+  const input = document.createElement("input");
+  input.type = "password";
+  input.autocomplete = "current-password";
+  input.required = true;
+  label.append(labelText, input);
+
+  const button = document.createElement("button");
+  button.type = "submit";
+  button.textContent = "Unlock";
+
+  form.append(title, label, button);
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    unlockItem(item, input.value);
+  });
+
+  const box = document.createElement("div");
+  box.className = "preview-message";
+  box.append(form);
+  els.previewArea.replaceChildren(box);
+  setTimeout(() => input.focus(), 0);
+}
+
+async function unlockItem(item, password) {
+  if (!password.trim()) {
+    toast("Enter password");
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/items/${encodeURIComponent(item.id)}/unlock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    if (res.status === 404) {
+      renderMissingDetail(item.id);
+      await loadItems();
+      return;
+    }
+    if (res.status === 401) throw new Error("Wrong password");
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    state.tokens.set(item.id, payload.token);
+    toast("Unlocked");
+    await loadItems();
+    await loadDetail(item.id);
+  } catch (err) {
+    toast(cleanError(err));
+  }
+}
+
 async function renderPreview(item) {
   if (item.previewKind === "text") {
-    const res = await fetch(`/api/items/${encodeURIComponent(item.id)}/raw`);
+    const res = await fetch(itemURL(item, "raw"));
+    if (res.status === 401) {
+      handleAuthRequired(item);
+      return;
+    }
     if (!res.ok) throw new Error(await res.text());
     const text = await res.text();
     state.activePreviewText = text;
@@ -270,8 +386,9 @@ async function renderPreview(item) {
 
   if (item.previewKind === "image") {
     const img = document.createElement("img");
-    img.src = `/api/items/${encodeURIComponent(item.id)}/view`;
+    img.src = itemURL(item, "view");
     img.alt = item.name;
+    img.addEventListener("error", () => handleAuthRequired(item));
     els.previewArea.replaceChildren(img);
     return;
   }
@@ -279,7 +396,7 @@ async function renderPreview(item) {
   if (item.previewKind === "pdf") {
     const frame = document.createElement("iframe");
     frame.title = item.name;
-    frame.src = `/api/items/${encodeURIComponent(item.id)}/view`;
+    frame.src = itemURL(item, "view");
     els.previewArea.replaceChildren(frame);
     return;
   }
@@ -287,7 +404,8 @@ async function renderPreview(item) {
   if (item.previewKind === "audio") {
     const audio = document.createElement("audio");
     audio.controls = true;
-    audio.src = `/api/items/${encodeURIComponent(item.id)}/view`;
+    audio.src = itemURL(item, "view");
+    audio.addEventListener("error", () => handleAuthRequired(item));
     els.previewArea.replaceChildren(audio);
     return;
   }
@@ -295,12 +413,22 @@ async function renderPreview(item) {
   if (item.previewKind === "video") {
     const video = document.createElement("video");
     video.controls = true;
-    video.src = `/api/items/${encodeURIComponent(item.id)}/view`;
+    video.src = itemURL(item, "view");
+    video.addEventListener("error", () => handleAuthRequired(item));
     els.previewArea.replaceChildren(video);
     return;
   }
 
   renderPreviewMessage("No browser preview is available for this file type. Download it to open it locally.");
+}
+
+function handleAuthRequired(item) {
+  if (!item.protected) return;
+  state.tokens.delete(item.id);
+  state.activePreviewText = "";
+  renderDetail(item);
+  renderUnlockPrompt(item);
+  toast("Enter password again");
 }
 
 function renderPreviewMessage(message) {
@@ -328,6 +456,14 @@ function timeLeft(expiresAt) {
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s left`;
 }
 
+function ttlSecondsFrom(input) {
+  const parsed = Number.parseFloat(input.value);
+  let minutes = Number.isFinite(parsed) ? Math.round(parsed) : DEFAULT_TTL_MINUTES;
+  minutes = Math.min(MAX_TTL_MINUTES, Math.max(1, minutes));
+  input.value = String(minutes);
+  return minutes * 60;
+}
+
 async function uploadFiles(files) {
   const selected = Array.from(files || []);
   if (selected.length === 0 || state.busy) return;
@@ -335,11 +471,16 @@ async function uploadFiles(files) {
   state.busy = true;
   toast(`Uploading ${selected.length} ${selected.length === 1 ? "file" : "files"}...`);
   const data = new FormData();
+  data.append("ttlSeconds", String(ttlSecondsFrom(els.fileTTL)));
+  if (els.filePassword.value) {
+    data.append("password", els.filePassword.value);
+  }
   selected.forEach(file => data.append("files", file, file.name));
 
   try {
     const res = await fetch("/api/items/files", { method: "POST", body: data });
     if (!res.ok) throw new Error(await res.text());
+    els.filePassword.value = "";
     await loadItems();
     toast("Upload complete");
   } catch (err) {
@@ -352,6 +493,8 @@ async function uploadFiles(files) {
 
 async function shareText(event) {
   event.preventDefault();
+  if (state.busy) return;
+
   const text = els.textInput.value;
   const name = els.textName.value;
   if (!text.trim()) {
@@ -359,29 +502,49 @@ async function shareText(event) {
     return;
   }
 
+  state.busy = true;
   try {
     const res = await fetch("/api/items/text", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, text }),
+      body: JSON.stringify({
+        name,
+        text,
+        ttlSeconds: ttlSecondsFrom(els.textTTL),
+        password: els.textPassword.value,
+      }),
     });
     if (!res.ok) throw new Error(await res.text());
     els.textInput.value = "";
     els.textName.value = "";
+    els.textPassword.value = "";
     await loadItems();
     toast("Text shared");
   } catch (err) {
     toast(cleanError(err));
+  } finally {
+    state.busy = false;
   }
 }
 
 async function copyItemText(id) {
+  const item = knownItem(id);
+  if (item.protected && !hasAccess(item)) {
+    openDetail(id);
+    toast("Enter password first");
+    return;
+  }
+
   try {
     let text = "";
     if (state.activeItem && state.activeItem.id === id && state.activePreviewText) {
       text = state.activePreviewText;
     } else {
-      const res = await fetch(`/api/items/${encodeURIComponent(id)}/raw`);
+      const res = await fetch(itemURL(item, "raw"));
+      if (res.status === 401) {
+        handleAuthRequired(item);
+        return;
+      }
       if (!res.ok) throw new Error(await res.text());
       text = await res.text();
     }
@@ -422,6 +585,7 @@ async function deleteItem(id, options = {}) {
   try {
     const res = await fetch(`/api/items/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (!res.ok && res.status !== 404) throw new Error(await res.text());
+    state.tokens.delete(id);
     state.items = state.items.filter(item => item.id !== id);
     renderItems();
     toast("Deleted");
@@ -465,6 +629,10 @@ if (typeof mobileLayout.addEventListener === "function") {
 }
 els.composeTabs.querySelectorAll("[data-compose-tab]").forEach(button => {
   button.addEventListener("click", () => setComposeTab(button.dataset.composeTab));
+});
+
+[els.fileTTL, els.textTTL].forEach(input => {
+  input.addEventListener("blur", () => ttlSecondsFrom(input));
 });
 
 ["dragenter", "dragover"].forEach(type => {

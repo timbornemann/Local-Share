@@ -23,15 +23,43 @@
       </div>
 
       <section class="compose" id="composeView">
-        <label class="dropzone" id="dropzone" data-compose-panel="files">
-          <input id="fileInput" type="file" multiple>
-          <span class="drop-title">Choose files</span>
-          <span class="drop-subtitle">Tap, click, or drop anything from your device</span>
-        </label>
+        <div class="file-share" data-compose-panel="files">
+          <label class="dropzone" id="dropzone">
+            <input id="fileInput" type="file" multiple>
+            <span class="drop-title">Choose files</span>
+            <span class="drop-subtitle">Tap, click, or drop anything from your device</span>
+          </label>
+          <div class="share-options">
+            <label>
+              <span>Expires after</span>
+              <span class="number-unit">
+                <input id="fileTTL" type="number" min="1" max="1440" step="1" inputmode="numeric" value="5">
+                <span>min</span>
+              </span>
+            </label>
+            <label>
+              <span>Password</span>
+              <input id="filePassword" type="password" autocomplete="off" placeholder="Optional password">
+            </label>
+          </div>
+        </div>
 
         <form class="text-share" id="textForm" data-compose-panel="text">
           <input id="textName" type="text" maxlength="120" placeholder="Optional text name">
           <textarea id="textInput" rows="7" placeholder="Paste raw text"></textarea>
+          <div class="share-options">
+            <label>
+              <span>Expires after</span>
+              <span class="number-unit">
+                <input id="textTTL" type="number" min="1" max="1440" step="1" inputmode="numeric" value="5">
+                <span>min</span>
+              </span>
+            </label>
+            <label>
+              <span>Password</span>
+              <input id="textPassword" type="password" autocomplete="off" placeholder="Optional password">
+            </label>
+          </div>
           <button type="submit">Share Text</button>
         </form>
       </section>

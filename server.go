@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,8 +25,9 @@ import (
 )
 
 const (
-	kindFile = "file"
-	kindText = "text"
+	kindFile    = "file"
+	kindText    = "text"
+	maxShareTTL = 24 * time.Hour
 )
 
 type Config struct {
@@ -36,14 +40,17 @@ type Config struct {
 }
 
 type item struct {
-	ID          string
-	Kind        string
-	Name        string
-	Size        int64
-	ContentType string
-	Path        string
-	CreatedAt   time.Time
-	ExpiresAt   time.Time
+	ID           string
+	Kind         string
+	Name         string
+	Size         int64
+	ContentType  string
+	Path         string
+	PasswordSalt []byte
+	PasswordHash []byte
+	AccessTokens map[string]time.Time
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
 }
 
 type itemDTO struct {
@@ -52,10 +59,16 @@ type itemDTO struct {
 	Name        string    `json:"name"`
 	Size        int64     `json:"size"`
 	ContentType string    `json:"contentType"`
+	Protected   bool      `json:"protected"`
 	Previewable bool      `json:"previewable"`
 	PreviewKind string    `json:"previewKind"`
 	CreatedAt   time.Time `json:"createdAt"`
 	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
+type shareOptions struct {
+	TTL      time.Duration
+	Password string
 }
 
 type Server struct {
@@ -198,6 +211,7 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	created := make([]itemDTO, 0)
+	options := shareOptions{TTL: s.ttl}
 	for {
 		part, err := reader.NextPart()
 		if errors.Is(err, io.EOF) {
@@ -207,12 +221,32 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "read multipart data", http.StatusBadRequest)
 			return
 		}
-		if part.FormName() != "files" || part.FileName() == "" {
+		if part.FileName() == "" {
+			value, err := readSmallPart(part)
+			_ = part.Close()
+			if err != nil {
+				http.Error(w, "invalid upload option", http.StatusBadRequest)
+				return
+			}
+			switch part.FormName() {
+			case "password":
+				options.Password = value
+			case "ttlSeconds":
+				ttl, err := parseTTLSeconds(value, s.ttl)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				options.TTL = ttl
+			}
+			continue
+		}
+		if part.FormName() != "files" {
 			_ = part.Close()
 			continue
 		}
 
-		dto, err := s.storeStream(kindFile, part.FileName(), part.Header.Get("Content-Type"), part)
+		dto, err := s.storeStream(kindFile, part.FileName(), part.Header.Get("Content-Type"), part, options)
 		_ = part.Close()
 		if err != nil {
 			writeStorageError(w, err)
@@ -237,8 +271,10 @@ func (s *Server) handleCreateText(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Text string `json:"text"`
-		Name string `json:"name"`
+		Text       string `json:"text"`
+		Name       string `json:"name"`
+		Password   string `json:"password"`
+		TTLSeconds int64  `json:"ttlSeconds"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&req); err != nil {
@@ -251,7 +287,15 @@ func (s *Server) handleCreateText(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := cleanDisplayName(req.Name, "Text snippet")
-	dto, err := s.storeStream(kindText, name, "text/plain; charset=utf-8", strings.NewReader(req.Text))
+	ttl, err := parseTTLSeconds(strconv.FormatInt(req.TTLSeconds, 10), s.ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	dto, err := s.storeStream(kindText, name, "text/plain; charset=utf-8", strings.NewReader(req.Text), shareOptions{
+		TTL:      ttl,
+		Password: req.Password,
+	})
 	if err != nil {
 		writeStorageError(w, err)
 		return
@@ -301,6 +345,11 @@ func (s *Server) handleItemAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "unlock" && r.Method == http.MethodPost {
+		s.handleUnlock(w, r, id)
+		return
+	}
+
 	if len(parts) == 2 && parts[1] == "raw" && r.Method == http.MethodGet {
 		s.handleDownload(w, r, id, false)
 		return
@@ -314,14 +363,46 @@ func (s *Server) handleItemAction(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request, id string) {
+	if s.cleanupExpired() {
+		s.broadcast("expired")
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	token, expiresAt, status, err := s.createAccessToken(id, req.Password)
+	if err != nil {
+		http.Error(w, "could not unlock item", http.StatusInternalServerError)
+		return
+	}
+	switch status {
+	case http.StatusOK:
+		writeJSON(w, http.StatusOK, struct {
+			Token     string    `json:"token"`
+			ExpiresAt time.Time `json:"expiresAt"`
+		}{Token: token, ExpiresAt: expiresAt})
+	case http.StatusNotFound:
+		http.NotFound(w, r)
+	case http.StatusBadRequest:
+		http.Error(w, "item is not password protected", http.StatusBadRequest)
+	default:
+		http.Error(w, "invalid password", http.StatusUnauthorized)
+	}
+}
+
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, id string, attachment bool) {
 	if s.cleanupExpired() {
 		s.broadcast("expired")
 	}
 
-	it, ok := s.getActiveItem(id)
+	it, ok := s.requireReadableItem(w, r, id)
 	if !ok {
-		http.NotFound(w, r)
 		return
 	}
 	if !attachment && !isTextPreviewable(it) {
@@ -358,9 +439,8 @@ func (s *Server) handleView(w http.ResponseWriter, r *http.Request, id string) {
 		s.broadcast("expired")
 	}
 
-	it, ok := s.getActiveItem(id)
+	it, ok := s.requireReadableItem(w, r, id)
 	if !ok {
-		http.NotFound(w, r)
 		return
 	}
 	kind := previewKindFor(it)
@@ -420,13 +500,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) storeStream(kind, name, contentType string, reader io.Reader) (itemDTO, error) {
+func (s *Server) storeStream(kind, name, contentType string, reader io.Reader, options shareOptions) (itemDTO, error) {
 	id, err := randomID()
 	if err != nil {
 		return itemDTO{}, err
 	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
+	}
+	if options.TTL <= 0 {
+		options.TTL = s.ttl
 	}
 	name = cleanDisplayName(name, "download")
 
@@ -445,16 +528,25 @@ func (s *Server) storeStream(kind, name, contentType string, reader io.Reader) (
 		return itemDTO{}, closeErr
 	}
 
+	salt, hash, err := newPasswordDigest(options.Password)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return itemDTO{}, err
+	}
+
 	now := s.now().UTC()
 	it := &item{
-		ID:          id,
-		Kind:        kind,
-		Name:        name,
-		Size:        written,
-		ContentType: contentType,
-		Path:        tmpPath,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(s.ttl),
+		ID:           id,
+		Kind:         kind,
+		Name:         name,
+		Size:         written,
+		ContentType:  contentType,
+		Path:         tmpPath,
+		PasswordSalt: salt,
+		PasswordHash: hash,
+		AccessTokens: make(map[string]time.Time),
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(options.TTL),
 	}
 
 	s.mu.Lock()
@@ -462,6 +554,67 @@ func (s *Server) storeStream(kind, name, contentType string, reader io.Reader) (
 	s.mu.Unlock()
 
 	return toDTO(it), nil
+}
+
+func (s *Server) requireReadableItem(w http.ResponseWriter, r *http.Request, id string) (*item, bool) {
+	it, ok := s.getActiveItem(id)
+	if !ok {
+		http.NotFound(w, r)
+		return nil, false
+	}
+	if !isProtectedItem(it) || s.hasValidAccessToken(id, accessTokenFromRequest(r)) {
+		return it, true
+	}
+	http.Error(w, "password required", http.StatusUnauthorized)
+	return nil, false
+}
+
+func (s *Server) createAccessToken(id, password string) (string, time.Time, int, error) {
+	now := s.now().UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	it, ok := s.items[id]
+	if !ok || !it.ExpiresAt.After(now) {
+		return "", time.Time{}, http.StatusNotFound, nil
+	}
+	if !isProtectedItem(it) {
+		return "", time.Time{}, http.StatusBadRequest, nil
+	}
+	if !passwordMatches(it, password) {
+		return "", time.Time{}, http.StatusUnauthorized, nil
+	}
+
+	token, err := randomID()
+	if err != nil {
+		return "", time.Time{}, http.StatusInternalServerError, err
+	}
+	expiresAt := it.ExpiresAt
+	if it.AccessTokens == nil {
+		it.AccessTokens = make(map[string]time.Time)
+	}
+	pruneAccessTokens(it, now)
+	it.AccessTokens[token] = expiresAt
+	return token, expiresAt, http.StatusOK, nil
+}
+
+func (s *Server) hasValidAccessToken(id, token string) bool {
+	if token == "" {
+		return false
+	}
+
+	now := s.now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	it, ok := s.items[id]
+	if !ok || !it.ExpiresAt.After(now) {
+		return false
+	}
+	pruneAccessTokens(it, now)
+	expiresAt, ok := it.AccessTokens[token]
+	return ok && expiresAt.After(now)
 }
 
 func (s *Server) getActiveItem(id string) (*item, bool) {
@@ -473,6 +626,9 @@ func (s *Server) getActiveItem(id string) (*item, bool) {
 		return nil, false
 	}
 	copy := *it
+	copy.PasswordSalt = append([]byte(nil), it.PasswordSalt...)
+	copy.PasswordHash = append([]byte(nil), it.PasswordHash...)
+	copy.AccessTokens = nil
 	s.mu.RUnlock()
 	return &copy, true
 }
@@ -500,7 +656,9 @@ func (s *Server) cleanupExpired() bool {
 		if !it.ExpiresAt.After(now) {
 			paths = append(paths, it.Path)
 			delete(s.items, id)
+			continue
 		}
+		pruneAccessTokens(it, now)
 	}
 	s.mu.Unlock()
 
@@ -544,6 +702,7 @@ func toDTO(it *item) itemDTO {
 		Name:        it.Name,
 		Size:        it.Size,
 		ContentType: it.ContentType,
+		Protected:   isProtectedItem(it),
 		Previewable: previewKind != "",
 		PreviewKind: previewKind,
 		CreatedAt:   it.CreatedAt,
@@ -623,6 +782,79 @@ func randomID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+func newPasswordDigest(password string) ([]byte, []byte, error) {
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return nil, nil, nil
+	}
+
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, nil, err
+	}
+	return salt, hashPassword(salt, password), nil
+}
+
+func hashPassword(salt []byte, password string) []byte {
+	sum := sha256.Sum256(append(append([]byte(nil), salt...), []byte(strings.TrimSpace(password))...))
+	return sum[:]
+}
+
+func passwordMatches(it *item, password string) bool {
+	if !isProtectedItem(it) {
+		return true
+	}
+	got := hashPassword(it.PasswordSalt, password)
+	return subtle.ConstantTimeCompare(got, it.PasswordHash) == 1
+}
+
+func isProtectedItem(it *item) bool {
+	return it != nil && len(it.PasswordHash) > 0
+}
+
+func pruneAccessTokens(it *item, now time.Time) {
+	for token, expiresAt := range it.AccessTokens {
+		if !expiresAt.After(now) {
+			delete(it.AccessTokens, token)
+		}
+	}
+}
+
+func accessTokenFromRequest(r *http.Request) string {
+	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(r.Header.Get("X-Share-Token"))
+}
+
+func readSmallPart(reader io.Reader) (string, error) {
+	const maxOptionBytes = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(reader, maxOptionBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > maxOptionBytes {
+		return "", errors.New("upload option is too large")
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func parseTTLSeconds(value string, fallback time.Duration) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if fallback <= 0 {
+		fallback = 5 * time.Minute
+	}
+	if value == "" || value == "0" {
+		return fallback, nil
+	}
+
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || seconds < 1 || seconds > int64(maxShareTTL/time.Second) {
+		return 0, fmt.Errorf("ttlSeconds must be between 1 and %d", int64(maxShareTTL/time.Second))
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 func cleanDisplayName(value, fallback string) string {

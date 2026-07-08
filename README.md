@@ -1,6 +1,6 @@
 # Local Share
 
-Local Share is a tiny LAN web app for temporary file and text exchange. It has no accounts, no database, and no persistent storage by default. Every shared item expires after 5 minutes.
+Local Share is a tiny LAN web app for temporary file and text exchange. It has no accounts, no database, and no persistent storage by default. Shared items expire after 5 minutes unless a different lifetime is selected while sharing.
 
 ## Run Locally
 
@@ -53,19 +53,22 @@ or:
 ## API
 
 - `GET /` opens the browser UI.
-- `GET /api/items` lists active shares.
+- `GET /api/items` lists active shares, including `protected`, `previewable`, and `previewKind` metadata.
 - `GET /api/items/{id}` returns metadata for one active share.
-- `POST /api/items/files` accepts multipart uploads with repeated `files` fields.
-- `POST /api/items/text` accepts JSON: `{ "text": "...", "name": "optional" }`.
-- `GET /api/items/{id}/download` downloads a file or text item.
-- `GET /api/items/{id}/raw` returns text shares and text/code files as `text/plain`.
-- `GET /api/items/{id}/view` streams browser-previewable files inline.
+- `POST /api/items/files` accepts multipart uploads with repeated `files` fields. Optional form fields: `ttlSeconds` and `password`.
+- `POST /api/items/text` accepts JSON: `{ "text": "...", "name": "optional", "ttlSeconds": 300, "password": "optional" }`.
+- `POST /api/items/{id}/unlock` accepts JSON `{ "password": "..." }` and returns `{ "token": "...", "expiresAt": "..." }` for protected shares.
+- `GET /api/items/{id}/download` downloads a file or text item. Protected items require `?token=...` or `X-Share-Token`.
+- `GET /api/items/{id}/raw` returns text shares and text/code files as `text/plain`. Protected items require `?token=...` or `X-Share-Token`.
+- `GET /api/items/{id}/view` streams browser-previewable files inline. Protected items require `?token=...` or `X-Share-Token`.
 - `DELETE /api/items/{id}` removes an item.
 - `GET /api/events` streams Server-Sent Events when the list changes.
 
 ## Notes
 
 - The app is intentionally open to the local network.
+- The default lifetime is 5 minutes. The UI allows 1 to 1440 minutes per share.
+- Optional passwords hide preview/download/copy until unlocked in the browser. Password hashes and metadata stay in memory only; temporary files are not encrypted on disk.
 - Uploads are streamed to temporary files under `/tmp/local-share` in the container.
 - There is no app-side file size limit; practical limits are browser, network, Docker, and disk space.
 - Restarting the container clears all shares.
