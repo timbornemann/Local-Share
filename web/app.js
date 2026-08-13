@@ -5,6 +5,7 @@ const state = {
   items: [],
   activeItem: null,
   activePreviewText: "",
+  pendingFiles: [],
   composeTab: "files",
   busy: false,
   tokens: new Map(),
@@ -16,14 +17,17 @@ const els = {
   composeView: document.querySelector("#composeView"),
   listHead: document.querySelector("#listHead"),
   dropzone: document.querySelector("#dropzone"),
+  dropTitle: document.querySelector("#dropTitle"),
+  dropSubtitle: document.querySelector("#dropSubtitle"),
+  fileForm: document.querySelector("#fileForm"),
   fileInput: document.querySelector("#fileInput"),
-  fileTTL: document.querySelector("#fileTTL"),
-  filePassword: document.querySelector("#filePassword"),
+  pendingFiles: document.querySelector("#pendingFiles"),
+  shareFilesButton: document.querySelector("#shareFilesButton"),
+  shareTTL: document.querySelector("#shareTTL"),
+  sharePassword: document.querySelector("#sharePassword"),
   textForm: document.querySelector("#textForm"),
   textName: document.querySelector("#textName"),
   textInput: document.querySelector("#textInput"),
-  textTTL: document.querySelector("#textTTL"),
-  textPassword: document.querySelector("#textPassword"),
   items: document.querySelector("#items"),
   itemCount: document.querySelector("#itemCount"),
   detailView: document.querySelector("#detailView"),
@@ -464,23 +468,79 @@ function ttlSecondsFrom(input) {
   return minutes * 60;
 }
 
-async function uploadFiles(files) {
+function stageFiles(files) {
   const selected = Array.from(files || []);
-  if (selected.length === 0 || state.busy) return;
+  if (selected.length === 0) return;
+  state.pendingFiles.push(...selected);
+  els.fileInput.value = "";
+  renderPendingFiles();
+}
+
+function removePendingFile(index) {
+  state.pendingFiles.splice(index, 1);
+  renderPendingFiles();
+}
+
+function renderPendingFiles() {
+  const files = state.pendingFiles;
+  const count = files.length;
+  els.pendingFiles.hidden = count === 0;
+  els.dropTitle.textContent = count === 0 ? "Choose files" : "Add more files";
+  els.dropSubtitle.textContent = count === 0
+    ? "Tap, click, or drop files, then share"
+    : "Review the list, then confirm below";
+  els.shareFilesButton.textContent = count === 1
+    ? "Share File"
+    : count > 1
+      ? `Share ${count} Files`
+      : "Share Files";
+
+  els.pendingFiles.replaceChildren(...files.map((file, index) => {
+    const row = document.createElement("li");
+    row.className = "pending-file";
+
+    const name = document.createElement("span");
+    name.className = "pending-file-name";
+    name.textContent = file.name;
+    name.title = file.name;
+
+    const size = document.createElement("span");
+    size.className = "pending-file-size";
+    size.textContent = formatBytes(file.size);
+
+    const remove = actionButton("Remove", "secondary", () => removePendingFile(index));
+    remove.setAttribute("aria-label", `Remove ${file.name}`);
+
+    row.append(name, size, remove);
+    return row;
+  }));
+}
+
+async function shareFiles(event) {
+  event.preventDefault();
+  if (state.busy) return;
+
+  const selected = state.pendingFiles.slice();
+  if (selected.length === 0) {
+    toast("Choose files first");
+    return;
+  }
 
   state.busy = true;
   toast(`Uploading ${selected.length} ${selected.length === 1 ? "file" : "files"}...`);
   const data = new FormData();
-  data.append("ttlSeconds", String(ttlSecondsFrom(els.fileTTL)));
-  if (els.filePassword.value) {
-    data.append("password", els.filePassword.value);
+  data.append("ttlSeconds", String(ttlSecondsFrom(els.shareTTL)));
+  if (els.sharePassword.value) {
+    data.append("password", els.sharePassword.value);
   }
   selected.forEach(file => data.append("files", file, file.name));
 
   try {
     const res = await fetch("/api/items/files", { method: "POST", body: data });
     if (!res.ok) throw new Error(await res.text());
-    els.filePassword.value = "";
+    state.pendingFiles = [];
+    renderPendingFiles();
+    els.sharePassword.value = "";
     await loadItems();
     toast("Upload complete");
   } catch (err) {
@@ -510,14 +570,14 @@ async function shareText(event) {
       body: JSON.stringify({
         name,
         text,
-        ttlSeconds: ttlSecondsFrom(els.textTTL),
-        password: els.textPassword.value,
+        ttlSeconds: ttlSecondsFrom(els.shareTTL),
+        password: els.sharePassword.value,
       }),
     });
     if (!res.ok) throw new Error(await res.text());
     els.textInput.value = "";
     els.textName.value = "";
-    els.textPassword.value = "";
+    els.sharePassword.value = "";
     await loadItems();
     toast("Text shared");
   } catch (err) {
@@ -618,7 +678,8 @@ function connectEvents() {
   events.onerror = () => setStatus("Reconnecting", "offline");
 }
 
-els.fileInput.addEventListener("change", event => uploadFiles(event.target.files));
+els.fileForm.addEventListener("submit", shareFiles);
+els.fileInput.addEventListener("change", event => stageFiles(event.target.files));
 els.textForm.addEventListener("submit", shareText);
 els.backButton.addEventListener("click", openHome);
 window.addEventListener("popstate", renderRoute);
@@ -631,9 +692,7 @@ els.composeTabs.querySelectorAll("[data-compose-tab]").forEach(button => {
   button.addEventListener("click", () => setComposeTab(button.dataset.composeTab));
 });
 
-[els.fileTTL, els.textTTL].forEach(input => {
-  input.addEventListener("blur", () => ttlSecondsFrom(input));
-});
+els.shareTTL.addEventListener("blur", () => ttlSecondsFrom(els.shareTTL));
 
 ["dragenter", "dragover"].forEach(type => {
   els.dropzone.addEventListener(type, event => {
@@ -649,7 +708,7 @@ els.composeTabs.querySelectorAll("[data-compose-tab]").forEach(button => {
   });
 });
 
-els.dropzone.addEventListener("drop", event => uploadFiles(event.dataTransfer.files));
+els.dropzone.addEventListener("drop", event => stageFiles(event.dataTransfer.files));
 
 setInterval(() => {
   renderItems();

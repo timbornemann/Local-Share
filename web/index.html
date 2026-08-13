@@ -23,43 +23,33 @@
       </div>
 
       <section class="compose" id="composeView">
-        <div class="file-share" data-compose-panel="files">
+        <div class="share-options">
+          <label>
+            <span>Expires after</span>
+            <span class="number-unit">
+              <input id="shareTTL" type="number" min="1" max="1440" step="1" inputmode="numeric" value="5">
+              <span>min</span>
+            </span>
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="sharePassword" type="password" autocomplete="off" placeholder="Optional password">
+          </label>
+        </div>
+
+        <form class="file-share" id="fileForm" data-compose-panel="files">
           <label class="dropzone" id="dropzone">
             <input id="fileInput" type="file" multiple>
-            <span class="drop-title">Choose files</span>
-            <span class="drop-subtitle">Tap, click, or drop anything from your device</span>
+            <span class="drop-title" id="dropTitle">Choose files</span>
+            <span class="drop-subtitle" id="dropSubtitle">Tap, click, or drop files, then share</span>
           </label>
-          <div class="share-options">
-            <label>
-              <span>Expires after</span>
-              <span class="number-unit">
-                <input id="fileTTL" type="number" min="1" max="1440" step="1" inputmode="numeric" value="5">
-                <span>min</span>
-              </span>
-            </label>
-            <label>
-              <span>Password</span>
-              <input id="filePassword" type="password" autocomplete="off" placeholder="Optional password">
-            </label>
-          </div>
-        </div>
+          <ul class="pending-files" id="pendingFiles" hidden></ul>
+          <button type="submit" id="shareFilesButton">Share Files</button>
+        </form>
 
         <form class="text-share" id="textForm" data-compose-panel="text">
           <input id="textName" type="text" maxlength="120" placeholder="Optional text name">
           <textarea id="textInput" rows="7" placeholder="Paste raw text"></textarea>
-          <div class="share-options">
-            <label>
-              <span>Expires after</span>
-              <span class="number-unit">
-                <input id="textTTL" type="number" min="1" max="1440" step="1" inputmode="numeric" value="5">
-                <span>min</span>
-              </span>
-            </label>
-            <label>
-              <span>Password</span>
-              <input id="textPassword" type="password" autocomplete="off" placeholder="Optional password">
-            </label>
-          </div>
           <button type="submit">Share Text</button>
         </form>
       </section>
