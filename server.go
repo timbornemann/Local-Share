@@ -992,7 +992,7 @@ func cleanDisplayName(value, fallback string) string {
 		return r
 	}, value)
 	value = strings.TrimSpace(value)
-	if value == "" || value == "." || value == string(filepath.Separator) {
+	if value == "" || value == "." || value == ".." || value == string(filepath.Separator) {
 		return fallback
 	}
 	return value

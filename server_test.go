@@ -625,6 +625,24 @@ func TestSSEEmitsItemChange(t *testing.T) {
 	waitForEvent(t, events, "items_changed")
 }
 
+func TestCleanDisplayName(t *testing.T) {
+	cases := map[string]string{
+		"report.pdf":           "report.pdf",
+		"../../etc/passwd":     "passwd",
+		`C:\Users\me\file.txt`: "file.txt",
+		"..":                   "fallback",
+		".":                    "fallback",
+		"":                     "fallback",
+		"  \x00 ":              "fallback",
+		"a\nb.txt":             "ab.txt",
+	}
+	for input, want := range cases {
+		if got := cleanDisplayName(input, "fallback"); got != want {
+			t.Errorf("cleanDisplayName(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestSSESendsKeepAlive(t *testing.T) {
 	previous := eventKeepAliveInterval
 	eventKeepAliveInterval = 20 * time.Millisecond
