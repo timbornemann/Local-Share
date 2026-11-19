@@ -13,6 +13,8 @@ const state = {
   composeTab: "files",
   busy: false,
   tokens: new Map(),
+  // Server-side limits in bytes; 0 means unlimited or not loaded yet.
+  limits: { maxFileSize: 0, maxTextSize: 0 },
 };
 
 const els = {
@@ -479,9 +481,32 @@ function ttlSecondsFrom(input) {
   return minutes * 60;
 }
 
+async function loadLimits() {
+  try {
+    const res = await fetch("/api/config");
+    if (!res.ok) return;
+    const config = await res.json();
+    state.limits.maxFileSize = config.maxFileSize || 0;
+    state.limits.maxTextSize = config.maxTextSize || 0;
+  } catch (_err) {
+    // The server enforces the limits anyway; this only enables earlier feedback.
+  }
+}
+
 function stageFiles(files) {
-  const selected = Array.from(files || []);
-  if (selected.length === 0) return;
+  let selected = Array.from(files || []);
+  const maxFileSize = state.limits.maxFileSize;
+  if (maxFileSize > 0) {
+    const tooLarge = selected.filter(file => file.size > maxFileSize);
+    if (tooLarge.length > 0) {
+      selected = selected.filter(file => file.size <= maxFileSize);
+      toast(`${tooLarge.length === 1 ? tooLarge[0].name : `${tooLarge.length} files`} exceed${tooLarge.length === 1 ? "s" : ""} the ${formatBytes(maxFileSize)} limit`);
+    }
+  }
+  if (selected.length === 0) {
+    els.fileInput.value = "";
+    return;
+  }
   state.pendingFiles.push(...selected);
   els.fileInput.value = "";
   renderPendingFiles();
@@ -570,6 +595,10 @@ async function shareText(event) {
   const name = els.textName.value;
   if (!text.trim()) {
     toast("Add text first");
+    return;
+  }
+  if (state.limits.maxTextSize > 0 && new Blob([text]).size > state.limits.maxTextSize) {
+    toast(`Text exceeds the ${formatBytes(state.limits.maxTextSize)} limit`);
     return;
   }
 
@@ -766,6 +795,7 @@ function tickMeta() {
 setInterval(tickMeta, 1000);
 
 setComposeTab(state.composeTab);
+loadLimits();
 loadItems()
   .then(renderRoute)
   .then(() => setStatus("Live", "live"))

@@ -986,3 +986,159 @@ func TestAppResponsesCarrySecurityHeaders(t *testing.T) {
 		t.Errorf("API responses must not be cached")
 	}
 }
+
+func newLimitedServer(t *testing.T, cfg Config) *Server {
+	t.Helper()
+	cfg.TempDir = t.TempDir()
+	cfg.CleanupInterval = time.Hour
+	cfg.StaticFS = webFS
+	cfg.AllowedHosts = []string{"*"}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return srv
+}
+
+func rawUpload(t *testing.T, handler http.Handler, files map[string][]byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for name, content := range files {
+		part, err := writer.CreateFormFile("files", name)
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		_, _ = part.Write(content)
+	}
+	_ = writer.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/items/files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func storedFileCount(t *testing.T, srv *Server) int {
+	t.Helper()
+	entries, err := os.ReadDir(srv.tempDir)
+	if err != nil {
+		t.Fatalf("read temp dir: %v", err)
+	}
+	return len(entries)
+}
+
+func TestOversizedFileIsRejectedAndLeavesNothingBehind(t *testing.T) {
+	srv := newLimitedServer(t, Config{MaxFileSize: 100})
+	handler := srv.Routes()
+
+	rec := rawUpload(t, handler, map[string][]byte{"big.bin": bytes.Repeat([]byte("x"), 101)})
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized upload status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if n := storedFileCount(t, srv); n != 0 {
+		t.Fatalf("oversized upload left %d temp file(s)", n)
+	}
+	if srv.used != 0 {
+		t.Fatalf("storage accounting leaked %d bytes", srv.used)
+	}
+
+	if rec := rawUpload(t, handler, map[string][]byte{"ok.bin": bytes.Repeat([]byte("x"), 100)}); rec.Code != http.StatusCreated {
+		t.Fatalf("file at the limit status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTotalStorageLimitAndAccounting(t *testing.T) {
+	srv := newLimitedServer(t, Config{MaxTotalSize: 150})
+	handler := srv.Routes()
+
+	first := uploadFiles(t, handler, map[string][]byte{"a.bin": bytes.Repeat([]byte("a"), 100)})
+	rec := rawUpload(t, handler, map[string][]byte{"b.bin": bytes.Repeat([]byte("b"), 100)})
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("upload beyond total limit status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if n := storedFileCount(t, srv); n != 1 {
+		t.Fatalf("expected only the first file on disk, found %d", n)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/items/"+first[0].ID, nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if srv.used != 0 {
+		t.Fatalf("deleting should release storage, used = %d", srv.used)
+	}
+	if rec := rawUpload(t, handler, map[string][]byte{"b.bin": bytes.Repeat([]byte("b"), 100)}); rec.Code != http.StatusCreated {
+		t.Fatalf("upload after freeing space status = %d", rec.Code)
+	}
+}
+
+func TestExpiredItemsReleaseStorage(t *testing.T) {
+	srv := newLimitedServer(t, Config{MaxTotalSize: 100, TTL: time.Minute})
+	clock := &testClock{now: time.Now()}
+	srv.now = clock.Now
+	handler := srv.Routes()
+
+	uploadFiles(t, handler, map[string][]byte{"a.bin": bytes.Repeat([]byte("a"), 100)})
+	clock.Advance(2 * time.Minute)
+	srv.cleanupExpired()
+	if srv.used != 0 {
+		t.Fatalf("expiry should release storage, used = %d", srv.used)
+	}
+}
+
+func TestItemCountLimit(t *testing.T) {
+	srv := newLimitedServer(t, Config{MaxItems: 2})
+	handler := srv.Routes()
+	createText(t, handler, "one", "1")
+	createText(t, handler, "two", "2")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/items/text", strings.NewReader(`{"text":"3"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("third item status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTextAndPasswordSizeLimits(t *testing.T) {
+	srv := newLimitedServer(t, Config{MaxTextSize: 10})
+	handler := srv.Routes()
+	post := func(body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/items/text", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := post(`{"text":"0123456789"}`); got != http.StatusCreated {
+		t.Fatalf("text at the limit status = %d", got)
+	}
+	if got := post(`{"text":"01234567890"}`); got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized text status = %d", got)
+	}
+	if got := post(`{"text":"` + strings.Repeat("x", 1<<20) + `"}`); got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("huge body status = %d", got)
+	}
+	if got := post(`{"text":"hi","password":"` + strings.Repeat("p", maxPasswordLength+1) + `"}`); got != http.StatusBadRequest {
+		t.Fatalf("overlong password status = %d", got)
+	}
+}
+
+func TestConfigEndpointExposesLimits(t *testing.T) {
+	srv := newLimitedServer(t, Config{MaxFileSize: 1234})
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("config status = %d", rec.Code)
+	}
+	var cfg struct {
+		MaxFileSize int64 `json:"maxFileSize"`
+		MaxItems    int   `json:"maxItems"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if cfg.MaxFileSize != 1234 || cfg.MaxItems != defaultMaxItems {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}

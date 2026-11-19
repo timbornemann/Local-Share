@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +26,10 @@ func main() {
 		CleanupInterval: 5 * time.Second,
 		StaticFS:        webFS,
 		AllowedHosts:    splitList(os.Getenv("LOCAL_SHARE_ALLOWED_HOSTS")),
+		MaxFileSize:     envMegabytes("LOCAL_SHARE_MAX_FILE_MB"),
+		MaxTotalSize:    envMegabytes("LOCAL_SHARE_MAX_TOTAL_MB"),
+		MaxTextSize:     envMegabytes("LOCAL_SHARE_MAX_TEXT_MB"),
+		MaxItems:        int(envInt("LOCAL_SHARE_MAX_ITEMS")),
 	}
 
 	app, err := NewServer(cfg)
@@ -90,6 +95,32 @@ func splitList(value string) []string {
 		}
 	}
 	return out
+}
+
+// envInt reads an integer limit. Unset or invalid selects the built-in default
+// (0); "0" or a negative number turns the limit off (-1).
+func envInt(key string) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		log.Printf("ignoring %s=%q: not a number", key, value)
+		return 0
+	}
+	if n <= 0 {
+		return -1
+	}
+	return n
+}
+
+func envMegabytes(key string) int64 {
+	n := envInt(key)
+	if n <= 0 {
+		return n
+	}
+	return n << 20
 }
 
 func env(key, fallback string) string {

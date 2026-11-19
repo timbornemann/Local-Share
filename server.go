@@ -27,7 +27,29 @@ import (
 // eventKeepAliveInterval is how often idle event streams get a comment line.
 var eventKeepAliveInterval = 25 * time.Second
 
-var errBlankPassword = errors.New("password must not be only whitespace")
+const (
+	defaultMaxFileSize  = 1 << 30 // 1 GiB
+	defaultMaxTotalSize = 2 << 30 // 2 GiB
+	defaultMaxItems     = 200
+	defaultMaxTextSize  = 5 << 20 // 5 MiB
+
+	maxPasswordLength   = 1024
+	maxMultipartParts   = 300
+	maxSubscribers      = 256
+	maxUnlockBodyBytes  = 16 << 10
+	maxJSONOverheadByte = 64 << 10
+)
+
+var (
+	errFileTooLarge = errors.New("file exceeds the size limit")
+	errStorageFull  = errors.New("not enough free share storage")
+	errTooManyItems = errors.New("too many active shares")
+)
+
+var (
+	errBlankPassword   = errors.New("password must not be only whitespace")
+	errPasswordTooLong = fmt.Errorf("password must be at most %d bytes", maxPasswordLength)
+)
 
 const (
 	kindFile    = "file"
@@ -42,6 +64,13 @@ type Config struct {
 	CleanupInterval time.Duration
 	StaticFS        fs.FS
 	Now             func() time.Time
+
+	// Limits protect the host from being filled up by uploads. Zero selects the
+	// default, a negative value disables the limit.
+	MaxFileSize  int64 // bytes per file
+	MaxTotalSize int64 // bytes across all active shares
+	MaxItems     int   // number of active shares
+	MaxTextSize  int64 // bytes per text share
 
 	// AllowedHosts lists extra Host header values accepted besides IP
 	// addresses, localhost and local-only names. See hostAllowed.
@@ -89,8 +118,15 @@ type Server struct {
 	staticHandler   http.Handler
 	allowedHosts    []string
 
-	mu    sync.RWMutex
-	items map[string]*item
+	maxFileSize  int64
+	maxTotalSize int64
+	maxItems     int
+	maxTextSize  int64
+
+	mu      sync.RWMutex
+	items   map[string]*item
+	used    int64 // bytes on disk for active shares plus uploads in progress
+	pending int   // uploads in progress, counted against maxItems
 
 	subsMu      sync.Mutex
 	subscribers map[chan string]struct{}
@@ -115,6 +151,12 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.StaticFS == nil {
 		cfg.StaticFS = webFS
 	}
+	cfg.MaxFileSize = limitOrDefault(cfg.MaxFileSize, defaultMaxFileSize)
+	cfg.MaxTotalSize = limitOrDefault(cfg.MaxTotalSize, defaultMaxTotalSize)
+	cfg.MaxTextSize = limitOrDefault(cfg.MaxTextSize, defaultMaxTextSize)
+	if cfg.MaxItems == 0 {
+		cfg.MaxItems = defaultMaxItems
+	}
 	if err := os.MkdirAll(cfg.TempDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -137,6 +179,10 @@ func NewServer(cfg Config) (*Server, error) {
 		indexHTML:       indexHTML,
 		staticHandler:   http.FileServer(http.FS(static)),
 		allowedHosts:    cfg.AllowedHosts,
+		maxFileSize:     cfg.MaxFileSize,
+		maxTotalSize:    cfg.MaxTotalSize,
+		maxItems:        cfg.MaxItems,
+		maxTextSize:     cfg.MaxTextSize,
 		items:           make(map[string]*item),
 		subscribers:     make(map[chan string]struct{}),
 		stopping:        make(chan struct{}),
@@ -159,7 +205,7 @@ func (s *Server) Close() {
 	paths := make([]string, 0, len(s.items))
 	for id, it := range s.items {
 		paths = append(paths, it.Path)
-		delete(s.items, id)
+		s.forgetLocked(id, it)
 	}
 	s.mu.Unlock()
 
@@ -188,9 +234,17 @@ func removeStaleFiles(dir string, cutoff time.Time) {
 	}
 }
 
+func limitOrDefault(value, fallback int64) int64 {
+	if value == 0 {
+		return fallback
+	}
+	return value
+}
+
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.StripPrefix("/static/", s.staticHandler))
+	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/items/files", s.handleUploadFiles)
 	mux.HandleFunc("/api/items/text", s.handleCreateText)
 	mux.HandleFunc("/api/items/", s.handleItemAction)
@@ -230,6 +284,28 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(s.indexHTML)
+}
+
+// handleConfig tells the UI which limits apply so it can refuse oversized
+// files before sending them, instead of failing mid-upload.
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		MaxFileSize  int64 `json:"maxFileSize"`
+		MaxTotalSize int64 `json:"maxTotalSize"`
+		MaxItems     int   `json:"maxItems"`
+		MaxTextSize  int64 `json:"maxTextSize"`
+		MaxTTL       int64 `json:"maxTtlSeconds"`
+	}{
+		MaxFileSize:  max(s.maxFileSize, 0),
+		MaxTotalSize: max(s.maxTotalSize, 0),
+		MaxItems:     max(s.maxItems, 0),
+		MaxTextSize:  max(s.maxTextSize, 0),
+		MaxTTL:       int64(maxShareTTL / time.Second),
+	})
 }
 
 func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
@@ -285,7 +361,11 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	options := shareOptions{TTL: s.ttl}
-	for {
+	for parts := 0; ; parts++ {
+		if parts >= maxMultipartParts {
+			http.Error(w, "too many form parts", http.StatusBadRequest)
+			return
+		}
 		part, err := reader.NextPart()
 		if errors.Is(err, io.EOF) {
 			break
@@ -361,9 +441,21 @@ func (s *Server) handleCreateText(w http.ResponseWriter, r *http.Request) {
 		Password   string `json:"password"`
 		TTLSeconds int64  `json:"ttlSeconds"`
 	}
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&req); err != nil {
+	body := io.Reader(r.Body)
+	if s.maxTextSize > 0 {
+		// JSON escaping can inflate text up to six times (control characters).
+		body = http.MaxBytesReader(w, r.Body, s.maxTextSize*6+maxJSONOverheadByte)
+	}
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if isBodyTooLarge(err) {
+			writeStorageError(w, errFileTooLarge)
+			return
+		}
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if s.maxTextSize > 0 && int64(len(req.Text)) > s.maxTextSize {
+		writeStorageError(w, errFileTooLarge)
 		return
 	}
 	if strings.TrimSpace(req.Text) == "" {
@@ -461,7 +553,7 @@ func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request, id string)
 	var req struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxUnlockBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
@@ -606,7 +698,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	ch := s.subscribe()
+	ch, ok := s.subscribe()
+	if !ok {
+		http.Error(w, "too many open event streams", http.StatusServiceUnavailable)
+		return
+	}
 	defer s.unsubscribe(ch)
 
 	writeSSE(w, "connected", "ready")
@@ -648,15 +744,23 @@ func (s *Server) storeStream(kind, name, contentType string, reader io.Reader, o
 	}
 	name = cleanDisplayName(name, "download")
 
+	if err := s.reserveSlot(); err != nil {
+		return itemDTO{}, err
+	}
+	defer s.releaseSlot()
+
 	tmp, err := os.CreateTemp(s.tempDir, "share-*")
 	if err != nil {
 		return itemDTO{}, err
 	}
 	tmpPath := tmp.Name()
-	written, copyErr := io.Copy(tmp, reader)
+	quota := &quotaWriter{dst: tmp, srv: s}
+	_, copyErr := io.Copy(quota, reader)
 	closeErr := tmp.Close()
+	written := quota.written
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(tmpPath)
+		s.releaseBytes(written)
 		if copyErr != nil {
 			return itemDTO{}, copyErr
 		}
@@ -666,6 +770,7 @@ func (s *Server) storeStream(kind, name, contentType string, reader io.Reader, o
 	salt, hash, err := newPasswordDigest(options.Password)
 	if err != nil {
 		_ = os.Remove(tmpPath)
+		s.releaseBytes(written)
 		return itemDTO{}, err
 	}
 
@@ -772,7 +877,7 @@ func (s *Server) deleteItem(id string) bool {
 	s.mu.Lock()
 	it, ok := s.items[id]
 	if ok {
-		delete(s.items, id)
+		s.forgetLocked(id, it)
 	}
 	s.mu.Unlock()
 	if !ok {
@@ -780,6 +885,73 @@ func (s *Server) deleteItem(id string) bool {
 	}
 	_ = os.Remove(it.Path)
 	return true
+}
+
+// forgetLocked drops an item from the index and returns its bytes to the
+// storage budget. The caller removes the file. s.mu must be held.
+func (s *Server) forgetLocked(id string, it *item) {
+	delete(s.items, id)
+	s.used -= it.Size
+	if s.used < 0 {
+		s.used = 0
+	}
+}
+
+func (s *Server) reserveSlot() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.maxItems > 0 && len(s.items)+s.pending >= s.maxItems {
+		return errTooManyItems
+	}
+	s.pending++
+	return nil
+}
+
+func (s *Server) releaseSlot() {
+	s.mu.Lock()
+	s.pending--
+	s.mu.Unlock()
+}
+
+func (s *Server) releaseBytes(n int64) {
+	s.mu.Lock()
+	s.used -= n
+	if s.used < 0 {
+		s.used = 0
+	}
+	s.mu.Unlock()
+}
+
+// quotaWriter enforces the per-file and total storage limits while a file is
+// streamed to disk, so an oversized upload is cut off as soon as it crosses a
+// limit instead of after it has filled the disk.
+type quotaWriter struct {
+	dst     io.Writer
+	srv     *Server
+	written int64
+}
+
+func (q *quotaWriter) Write(p []byte) (int, error) {
+	n := int64(len(p))
+	if q.srv.maxFileSize > 0 && q.written+n > q.srv.maxFileSize {
+		return 0, errFileTooLarge
+	}
+	q.srv.mu.Lock()
+	if q.srv.maxTotalSize > 0 && q.srv.used+n > q.srv.maxTotalSize {
+		q.srv.mu.Unlock()
+		return 0, errStorageFull
+	}
+	q.srv.used += n
+	q.srv.mu.Unlock()
+	q.written += n
+
+	wrote, err := q.dst.Write(p)
+	if int64(wrote) < n {
+		// Keep the accounting exact if the disk accepted only part of the write.
+		q.srv.releaseBytes(n - int64(wrote))
+		q.written -= n - int64(wrote)
+	}
+	return wrote, err
 }
 
 func (s *Server) cleanupExpired() bool {
@@ -790,7 +962,7 @@ func (s *Server) cleanupExpired() bool {
 	for id, it := range s.items {
 		if !it.ExpiresAt.After(now) {
 			paths = append(paths, it.Path)
-			delete(s.items, id)
+			s.forgetLocked(id, it)
 			continue
 		}
 		pruneAccessTokens(it, now)
@@ -803,12 +975,15 @@ func (s *Server) cleanupExpired() bool {
 	return len(paths) > 0
 }
 
-func (s *Server) subscribe() chan string {
-	ch := make(chan string, 8)
+func (s *Server) subscribe() (chan string, bool) {
 	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	if len(s.subscribers) >= maxSubscribers {
+		return nil, false
+	}
+	ch := make(chan string, 8)
 	s.subscribers[ch] = struct{}{}
-	s.subsMu.Unlock()
-	return ch
+	return ch, true
 }
 
 func (s *Server) unsubscribe(ch chan string) {
@@ -965,7 +1140,7 @@ func accessTokenFromRequest(r *http.Request) string {
 }
 
 func readSmallPart(reader io.Reader) (string, error) {
-	const maxOptionBytes = 1 << 20
+	const maxOptionBytes = 8 << 10
 	data, err := io.ReadAll(io.LimitReader(reader, maxOptionBytes+1))
 	if err != nil {
 		return "", err
@@ -982,6 +1157,9 @@ func readSmallPart(reader io.Reader) (string, error) {
 func validatePassword(password string) error {
 	if password != "" && strings.TrimSpace(password) == "" {
 		return errBlankPassword
+	}
+	if len(password) > maxPasswordLength {
+		return errPasswordTooLong
 	}
 	return nil
 }
@@ -1036,7 +1214,20 @@ func writeSSE(w io.Writer, event, data string) {
 	_, _ = fmt.Fprint(w, "\n")
 }
 
+func isBodyTooLarge(err error) bool {
+	var tooLarge *http.MaxBytesError
+	return errors.As(err, &tooLarge)
+}
+
 func writeStorageError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errFileTooLarge):
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	case errors.Is(err, errStorageFull), errors.Is(err, errTooManyItems):
+		http.Error(w, err.Error(), http.StatusInsufficientStorage)
+		return
+	}
 	if errors.Is(err, os.ErrPermission) {
 		http.Error(w, "storage is not writable", http.StatusInternalServerError)
 		return

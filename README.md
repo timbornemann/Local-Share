@@ -62,6 +62,7 @@ or:
 - `GET /api/items/{id}/raw` returns text shares and text/code files as `text/plain`. Protected items require `?token=...` or `X-Share-Token`.
 - `GET /api/items/{id}/view` streams browser-previewable files inline. Protected items require `?token=...` or `X-Share-Token`.
 - `DELETE /api/items/{id}` removes an item.
+- `GET /api/config` returns the active upload limits (`maxFileSize`, `maxTotalSize`, `maxItems`, `maxTextSize`; `0` means unlimited).
 - `GET /api/events` streams Server-Sent Events when the list changes.
 
 ## Notes
@@ -70,5 +71,5 @@ or:
 - The default lifetime is 5 minutes. The UI allows 1 to 1440 minutes per share.
 - Optional passwords hide preview/download/copy until unlocked in the browser. Password hashes and metadata stay in memory only; temporary files are not encrypted on disk.
 - Uploads are streamed to temporary files under `/tmp/local-share` in the container.
-- There is no app-side file size limit; practical limits are browser, network, Docker, and disk space.
+- Upload limits protect the host from being filled up. Defaults: 1024 MB per file, 2048 MB across all active shares, 200 active shares, 5 MB per text share. Change them with `LOCAL_SHARE_MAX_FILE_MB`, `LOCAL_SHARE_MAX_TOTAL_MB`, `LOCAL_SHARE_MAX_ITEMS` and `LOCAL_SHARE_MAX_TEXT_MB`; `0` disables a limit. Oversized uploads are rejected with `413`, a full store or too many shares with `507`.
 - Restarting the container clears all shares.
