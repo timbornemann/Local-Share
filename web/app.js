@@ -1,6 +1,10 @@
 const DEFAULT_TTL_MINUTES = 5;
 const MAX_TTL_MINUTES = 1440;
 
+// Incremented whenever the detail view changes, so that slow responses for a
+// previous item or route are discarded instead of overwriting the current view.
+let detailRequest = 0;
+
 const state = {
   items: [],
   activeItem: null,
@@ -241,6 +245,7 @@ function openHome() {
 async function renderRoute() {
   const id = currentDetailID();
   if (!id) {
+    detailRequest++;
     state.activeItem = null;
     state.activePreviewText = "";
     setMode("home");
@@ -252,6 +257,8 @@ async function renderRoute() {
 }
 
 async function loadDetail(id) {
+  const request = ++detailRequest;
+  const isCurrent = () => request === detailRequest;
   state.activeItem = null;
   state.activePreviewText = "";
   els.detailActions.replaceChildren();
@@ -263,21 +270,23 @@ async function loadDetail(id) {
 
   try {
     const res = await fetch(`/api/items/${encodeURIComponent(id)}`);
+    if (!isCurrent()) return;
     if (res.status === 404) {
       renderMissingDetail(id);
       return;
     }
     if (!res.ok) throw new Error(await res.text());
     const item = await res.json();
+    if (!isCurrent()) return;
     state.activeItem = item;
     renderDetail(item);
     if (item.protected && !hasAccess(item)) {
       renderUnlockPrompt(item);
       return;
     }
-    await renderPreview(item);
+    await renderPreview(item, isCurrent);
   } catch (err) {
-    renderPreviewMessage(cleanError(err));
+    if (isCurrent()) renderPreviewMessage(cleanError(err));
   }
 }
 
@@ -370,15 +379,17 @@ async function unlockItem(item, password) {
   }
 }
 
-async function renderPreview(item) {
+async function renderPreview(item, isCurrent = () => true) {
   if (item.previewKind === "text") {
     const res = await fetch(itemURL(item, "raw"));
+    if (!isCurrent()) return;
     if (res.status === 401) {
       handleAuthRequired(item);
       return;
     }
     if (!res.ok) throw new Error(await res.text());
     const text = await res.text();
+    if (!isCurrent()) return;
     state.activePreviewText = text;
     const pre = document.createElement("pre");
     const code = document.createElement("code");
@@ -662,14 +673,44 @@ function cleanError(err) {
   return message.length > 140 ? `${message.slice(0, 137)}...` : message;
 }
 
+// Reloads the list and keeps the open detail view consistent with it. Items
+// never change once created, so the detail view is only touched when its item
+// disappeared (or was never loaded); reloading it on every event would restart
+// playing media and throw away a half-typed password.
+async function refreshFromServer() {
+  await loadItems();
+  const id = currentDetailID();
+  if (!id) return;
+  if (!state.items.some(item => item.id === id)) {
+    detailRequest++;
+    state.activeItem = null;
+    state.activePreviewText = "";
+    renderMissingDetail(id);
+    return;
+  }
+  if (!state.activeItem || state.activeItem.id !== id) {
+    await loadDetail(id);
+  }
+}
+
 function connectEvents() {
   const events = new EventSource("/api/events");
-  events.addEventListener("connected", () => setStatus("Live", "live"));
+  let connectedBefore = false;
+  events.addEventListener("connected", async () => {
+    setStatus("Live", "live");
+    // Changes made while the stream was down were never announced.
+    if (connectedBefore) {
+      try {
+        await refreshFromServer();
+      } catch (_err) {
+        setStatus("Offline", "offline");
+      }
+    }
+    connectedBefore = true;
+  });
   events.addEventListener("items_changed", async () => {
     try {
-      await loadItems();
-      const id = currentDetailID();
-      if (id) await loadDetail(id);
+      await refreshFromServer();
       setStatus("Live", "live");
     } catch (_err) {
       setStatus("Offline", "offline");
@@ -710,10 +751,19 @@ els.shareTTL.addEventListener("blur", () => ttlSecondsFrom(els.shareTTL));
 
 els.dropzone.addEventListener("drop", event => stageFiles(event.dataTransfer.files));
 
-setInterval(() => {
-  renderItems();
+// Only the countdowns change from second to second. Update them in place so the
+// list keeps keyboard focus and in-progress clicks instead of being rebuilt.
+function tickMeta() {
+  const byID = new Map(state.items.map(item => [item.id, item]));
+  els.items.querySelectorAll(".item").forEach(row => {
+    const item = byID.get(row.dataset.id);
+    const meta = row.querySelector(".item-meta");
+    if (item && meta) renderMeta(meta, item);
+  });
   if (state.activeItem) renderMeta(els.detailMeta, state.activeItem);
-}, 1000);
+}
+
+setInterval(tickMeta, 1000);
 
 setComposeTab(state.composeTab);
 loadItems()
