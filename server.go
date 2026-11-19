@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,6 +137,9 @@ type Server struct {
 	unlockByClient *failureLimiter
 	unlockByItem   *failureLimiter
 
+	orphansMu sync.Mutex
+	orphans   []string // files that could not be deleted yet
+
 	stopOnce sync.Once
 	stopping chan struct{}
 }
@@ -162,7 +166,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.MaxItems == 0 {
 		cfg.MaxItems = defaultMaxItems
 	}
-	if err := os.MkdirAll(cfg.TempDir, 0o700); err != nil {
+	if err := prepareTempDir(cfg.TempDir); err != nil {
 		return nil, err
 	}
 	removeStaleFiles(cfg.TempDir, cfg.Now().Add(-maxShareTTL))
@@ -217,7 +221,7 @@ func (s *Server) Close() {
 	s.mu.Unlock()
 
 	for _, p := range paths {
-		_ = os.Remove(p)
+		s.removeFile(p)
 	}
 }
 
@@ -239,6 +243,34 @@ func removeStaleFiles(dir string, cutoff time.Time) {
 		}
 		_ = os.Remove(filepath.Join(dir, entry.Name()))
 	}
+}
+
+// prepareTempDir creates the private directory uploads are stored in. The
+// default location lives in a shared temp directory, so refuse a path that
+// someone else could have pre-created as a symlink or with open permissions.
+func prepareTempDir(dir string) error {
+	if info, err := os.Lstat(dir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("temp dir %s is a symbolic link; refusing to store uploads there", dir)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("temp dir %s is not a directory", dir)
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("temp dir %s is accessible to other users and cannot be restricted: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 func limitOrDefault(value, fallback int64) int64 {
@@ -915,12 +947,34 @@ func (s *Server) deleteItem(id string) bool {
 	if !ok {
 		return false
 	}
-	_ = os.Remove(it.Path)
+	s.removeFile(it.Path)
 	return true
 }
 
 // forgetLocked drops an item from the index and returns its bytes to the
 // storage budget. The caller removes the file. s.mu must be held.
+// removeFile deletes a stored file. If that fails (on Windows a file that is
+// still being downloaded cannot be removed) the path is remembered and retried,
+// so expired content never stays on disk just because it was busy once.
+func (s *Server) removeFile(path string) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		s.orphansMu.Lock()
+		s.orphans = append(s.orphans, path)
+		s.orphansMu.Unlock()
+	}
+}
+
+func (s *Server) retryOrphans() {
+	s.orphansMu.Lock()
+	pending := s.orphans
+	s.orphans = nil
+	s.orphansMu.Unlock()
+
+	for _, path := range pending {
+		s.removeFile(path)
+	}
+}
+
 func (s *Server) forgetLocked(id string, it *item) {
 	delete(s.items, id)
 	s.used -= it.Size
@@ -988,6 +1042,7 @@ func (q *quotaWriter) Write(p []byte) (int, error) {
 
 func (s *Server) cleanupExpired() bool {
 	now := s.now().UTC()
+	s.retryOrphans()
 	s.unlockByClient.prune(now)
 	s.unlockByItem.prune(now)
 	var paths []string
@@ -1004,7 +1059,7 @@ func (s *Server) cleanupExpired() bool {
 	s.mu.Unlock()
 
 	for _, p := range paths {
-		_ = os.Remove(p)
+		s.removeFile(p)
 	}
 	return len(paths) > 0
 }

@@ -1221,3 +1221,51 @@ func TestPasswordIsStoredAsSlowSaltedHash(t *testing.T) {
 		t.Fatalf("password verification is wrong")
 	}
 }
+
+func TestFailedFileRemovalIsRetried(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	path := srv.tempDir + string(os.PathSeparator) + "share-stuck"
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	srv.orphansMu.Lock()
+	srv.orphans = append(srv.orphans, path)
+	srv.orphansMu.Unlock()
+	srv.cleanupExpired()
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("queued file should be removed on the next cleanup, stat err = %v", err)
+	}
+
+	srv.removeFile(srv.tempDir + string(os.PathSeparator) + "share-already-gone")
+	srv.orphansMu.Lock()
+	defer srv.orphansMu.Unlock()
+	if len(srv.orphans) != 0 {
+		t.Fatalf("a file that no longer exists must not be queued: %v", srv.orphans)
+	}
+}
+
+func TestPrepareTempDirRejectsUnsafeLocations(t *testing.T) {
+	base := t.TempDir()
+
+	file := base + string(os.PathSeparator) + "plain-file"
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := prepareTempDir(file); err == nil {
+		t.Errorf("a regular file must not be accepted as temp dir")
+	}
+
+	target := base + string(os.PathSeparator) + "target"
+	link := base + string(os.PathSeparator) + "link"
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlink here: %v", err)
+	}
+	if err := prepareTempDir(link); err == nil {
+		t.Errorf("a symlinked temp dir must be rejected")
+	}
+}
