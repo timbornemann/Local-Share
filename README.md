@@ -14,8 +14,10 @@ Open [http://localhost:8080](http://localhost:8080).
 
 ```powershell
 docker build -t local-share .
-docker run --rm -p 8080:8080 local-share
+docker run --rm -p 8080:8080   --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=2200m,mode=1777   --cap-drop ALL --security-opt no-new-privileges:true   local-share
 ```
+
+The extra flags are optional but recommended (the release package and `docker-compose.yml` use them): uploads are untrusted data, so the container gets a read-only root filesystem, stores uploads only in an in-memory `noexec` tmpfs and drops all privileges. Keep the tmpfs `size` above `LOCAL_SHARE_MAX_TOTAL_MB`.
 
 Open the host machine from another device on the same network with:
 
@@ -68,6 +70,8 @@ or:
 ## Notes
 
 - The app is intentionally open to the local network.
+- Uploaded files are never executed or interpreted by the server: they are stored under random names with owner-only permissions, served only as downloads or sandboxed previews (`nosniff`, a locking CSP and no caching), and deleted when they expire, are removed, or the server stops.
+- Requests are accepted only for IP addresses, `localhost` and local-only host names (single-label, `.local`, `.lan`) to prevent DNS rebinding, and state-changing requests from other web sites are rejected. If you reach the app through another host name, for example behind a reverse proxy that keeps the `Host` header, list it in `LOCAL_SHARE_ALLOWED_HOSTS` (comma separated; `*.example.com` and `*` are supported).
 - The default lifetime is 5 minutes. The UI allows 1 to 1440 minutes per share.
 - Optional passwords hide preview/download/copy until unlocked in the browser. Password hashes and metadata stay in memory only; temporary files are not encrypted on disk. Passwords are stored as salted PBKDF2-SHA256 hashes, and repeated wrong passwords lock unlocking out (5 failures per client and item for 1 minute, 60 per item for 5 minutes; answered with `429` and `Retry-After`).
 - Uploads are streamed to temporary files under `/tmp/local-share` in the container.

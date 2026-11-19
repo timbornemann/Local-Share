@@ -7,3 +7,20 @@ services:
     restart: unless-stopped
     environment:
       LOCAL_SHARE_ADDR: ":8080"
+      # Hostnames other than IP addresses / local names that reach this app,
+      # for example behind a reverse proxy: LOCAL_SHARE_ALLOWED_HOSTS: "share.example.com"
+      # Limits in MB (0 = unlimited); keep the total below the tmpfs size.
+      # LOCAL_SHARE_MAX_FILE_MB: "1024"
+      # LOCAL_SHARE_MAX_TOTAL_MB: "2048"
+    # Uploads are untrusted data. Keep them away from anything that could run
+    # them: no writable root filesystem, uploads only in an in-memory tmpfs
+    # that is mounted noexec, no extra privileges.
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=2200m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
