@@ -11,6 +11,8 @@ const state = {
   activePreviewText: "",
   pendingFiles: [],
   composeTab: "files",
+  expiryMinutes: DEFAULT_TTL_MINUTES,
+  customExpiry: false,
   busy: false,
   tokens: new Map(),
   // Server-side limits in bytes; 0 means unlimited or not loaded yet.
@@ -19,21 +21,24 @@ const state = {
 
 const els = {
   connectionStatus: document.querySelector("#connectionStatus"),
+  homeView: document.querySelector("#homeView"),
+  shareForm: document.querySelector("#shareForm"),
   composeTabs: document.querySelector("#composeTabs"),
-  composeView: document.querySelector("#composeView"),
-  listHead: document.querySelector("#listHead"),
   dropzone: document.querySelector("#dropzone"),
   dropTitle: document.querySelector("#dropTitle"),
   dropSubtitle: document.querySelector("#dropSubtitle"),
-  fileForm: document.querySelector("#fileForm"),
   fileInput: document.querySelector("#fileInput"),
   pendingFiles: document.querySelector("#pendingFiles"),
-  shareFilesButton: document.querySelector("#shareFilesButton"),
-  shareTTL: document.querySelector("#shareTTL"),
-  sharePassword: document.querySelector("#sharePassword"),
-  textForm: document.querySelector("#textForm"),
   textName: document.querySelector("#textName"),
   textInput: document.querySelector("#textInput"),
+  expiryChips: document.querySelector("#expiryChips"),
+  customExpiry: document.querySelector("#customExpiry"),
+  shareTTL: document.querySelector("#shareTTL"),
+  passwordToggle: document.querySelector("#passwordToggle"),
+  passwordField: document.querySelector("#passwordField"),
+  sharePassword: document.querySelector("#sharePassword"),
+  passwordReveal: document.querySelector("#passwordReveal"),
+  shareButton: document.querySelector("#shareButton"),
   items: document.querySelector("#items"),
   itemCount: document.querySelector("#itemCount"),
   detailView: document.querySelector("#detailView"),
@@ -209,14 +214,9 @@ function currentDetailID() {
 
 function setMode(mode) {
   const isDetail = mode === "detail";
-  els.composeTabs.hidden = isDetail;
-  els.composeView.hidden = isDetail;
-  els.listHead.hidden = isDetail;
-  els.items.hidden = isDetail;
+  els.homeView.hidden = isDetail;
   els.detailView.hidden = !isDetail;
 }
-
-const mobileLayout = window.matchMedia("(max-width: 760px)");
 
 function setComposeTab(tab) {
   state.composeTab = tab;
@@ -225,13 +225,75 @@ function setComposeTab(tab) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
-  syncComposePanels();
+  document.querySelectorAll("[data-compose-panel]").forEach(panel => {
+    panel.hidden = panel.dataset.composePanel !== tab;
+  });
+  updateShareButton();
 }
 
-function syncComposePanels() {
-  document.querySelectorAll("[data-compose-panel]").forEach(panel => {
-    panel.hidden = mobileLayout.matches && panel.dataset.composePanel !== state.composeTab;
+function setExpiry(choice) {
+  state.customExpiry = choice === "custom";
+  if (!state.customExpiry) state.expiryMinutes = Number(choice);
+  els.expiryChips.querySelectorAll(".chip").forEach(chip => {
+    chip.setAttribute("aria-pressed", String(chip.dataset.minutes === String(choice)));
   });
+  els.customExpiry.hidden = !state.customExpiry;
+  if (state.customExpiry) {
+    els.shareTTL.focus();
+    els.shareTTL.select();
+  }
+}
+
+function selectedTTLSeconds() {
+  return state.customExpiry ? ttlSecondsFrom(els.shareTTL) : state.expiryMinutes * 60;
+}
+
+function setPasswordEnabled(enabled) {
+  els.passwordToggle.checked = enabled;
+  els.passwordField.hidden = !enabled;
+  if (enabled) {
+    els.sharePassword.focus();
+  } else {
+    els.sharePassword.value = "";
+    setPasswordRevealed(false);
+  }
+}
+
+function setPasswordRevealed(revealed) {
+  els.sharePassword.type = revealed ? "text" : "password";
+  els.passwordReveal.textContent = revealed ? "Hide" : "Show";
+  els.passwordReveal.setAttribute("aria-pressed", String(revealed));
+}
+
+// Returns the password to apply ("" for none), or null if the input is invalid.
+function readPassword() {
+  if (!els.passwordToggle.checked) return "";
+  const value = els.sharePassword.value;
+  if (!value.trim()) {
+    toast("Enter a password or turn protection off");
+    els.sharePassword.focus();
+    return null;
+  }
+  return value;
+}
+
+function updateShareButton() {
+  const files = state.pendingFiles.length;
+  let label;
+  let ready;
+  if (state.composeTab === "files") {
+    label = files === 0 ? "Share files" : files === 1 ? "Share 1 file" : `Share ${files} files`;
+    ready = files > 0;
+  } else {
+    label = "Share text";
+    ready = els.textInput.value.trim() !== "";
+  }
+  if (state.busy) {
+    label = "Sharing…";
+    ready = false;
+  }
+  els.shareButton.textContent = label;
+  els.shareButton.disabled = !ready;
 }
 
 function openDetail(id) {
@@ -523,13 +585,9 @@ function renderPendingFiles() {
   els.pendingFiles.hidden = count === 0;
   els.dropTitle.textContent = count === 0 ? "Choose files" : "Add more files";
   els.dropSubtitle.textContent = count === 0
-    ? "Tap, click, or drop files, then share"
-    : "Review the list, then confirm below";
-  els.shareFilesButton.textContent = count === 1
-    ? "Share File"
-    : count > 1
-      ? `Share ${count} Files`
-      : "Share Files";
+    ? "Drop files here, paste, or click to browse"
+    : "Drop, paste or click to add to the list";
+  updateShareButton();
 
   els.pendingFiles.replaceChildren(...files.map((file, index) => {
     const row = document.createElement("li");
@@ -552,23 +610,39 @@ function renderPendingFiles() {
   }));
 }
 
-async function shareFiles(event) {
+async function submitShare(event) {
   event.preventDefault();
   if (state.busy) return;
 
-  const selected = state.pendingFiles.slice();
-  if (selected.length === 0) {
-    toast("Choose files first");
-    return;
-  }
+  const password = readPassword();
+  if (password === null) return;
 
-  state.busy = true;
-  toast(`Uploading ${selected.length} ${selected.length === 1 ? "file" : "files"}...`);
-  const data = new FormData();
-  data.append("ttlSeconds", String(ttlSecondsFrom(els.shareTTL)));
-  if (els.sharePassword.value) {
-    data.append("password", els.sharePassword.value);
+  if (state.composeTab === "files") {
+    await shareFiles(password);
+  } else {
+    await shareText(password);
   }
+}
+
+function setBusy(busy) {
+  state.busy = busy;
+  updateShareButton();
+}
+
+function resetShareOptions() {
+  setPasswordEnabled(false);
+}
+
+async function shareFiles(password) {
+  const selected = state.pendingFiles.slice();
+  if (selected.length === 0) return;
+
+  setBusy(true);
+  toast(`Uploading ${selected.length} ${selected.length === 1 ? "file" : "files"}...`);
+  // Options must come before the files: they only apply to files that follow.
+  const data = new FormData();
+  data.append("ttlSeconds", String(selectedTTLSeconds()));
+  if (password) data.append("password", password);
   selected.forEach(file => data.append("files", file, file.name));
 
   try {
@@ -576,54 +650,47 @@ async function shareFiles(event) {
     if (!res.ok) throw new Error(await res.text());
     state.pendingFiles = [];
     renderPendingFiles();
-    els.sharePassword.value = "";
+    resetShareOptions();
     await loadItems();
-    toast("Upload complete");
+    toast(selected.length === 1 ? "File shared" : "Files shared");
   } catch (err) {
     toast(cleanError(err));
   } finally {
-    state.busy = false;
     els.fileInput.value = "";
+    setBusy(false);
   }
 }
 
-async function shareText(event) {
-  event.preventDefault();
-  if (state.busy) return;
-
+async function shareText(password) {
   const text = els.textInput.value;
-  const name = els.textName.value;
-  if (!text.trim()) {
-    toast("Add text first");
-    return;
-  }
+  if (!text.trim()) return;
   if (state.limits.maxTextSize > 0 && new Blob([text]).size > state.limits.maxTextSize) {
     toast(`Text exceeds the ${formatBytes(state.limits.maxTextSize)} limit`);
     return;
   }
 
-  state.busy = true;
+  setBusy(true);
   try {
     const res = await fetch("/api/items/text", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name,
+        name: els.textName.value,
         text,
-        ttlSeconds: ttlSecondsFrom(els.shareTTL),
-        password: els.sharePassword.value,
+        ttlSeconds: selectedTTLSeconds(),
+        password,
       }),
     });
     if (!res.ok) throw new Error(await res.text());
     els.textInput.value = "";
     els.textName.value = "";
-    els.sharePassword.value = "";
+    resetShareOptions();
     await loadItems();
     toast("Text shared");
   } catch (err) {
     toast(cleanError(err));
   } finally {
-    state.busy = false;
+    setBusy(false);
   }
 }
 
@@ -748,37 +815,61 @@ function connectEvents() {
   events.onerror = () => setStatus("Reconnecting", "offline");
 }
 
-els.fileForm.addEventListener("submit", shareFiles);
+els.shareForm.addEventListener("submit", submitShare);
 els.fileInput.addEventListener("change", event => stageFiles(event.target.files));
-els.textForm.addEventListener("submit", shareText);
 els.backButton.addEventListener("click", openHome);
 window.addEventListener("popstate", renderRoute);
-if (typeof mobileLayout.addEventListener === "function") {
-  mobileLayout.addEventListener("change", syncComposePanels);
-} else {
-  mobileLayout.addListener(syncComposePanels);
-}
+
 els.composeTabs.querySelectorAll("[data-compose-tab]").forEach(button => {
   button.addEventListener("click", () => setComposeTab(button.dataset.composeTab));
 });
-
+els.expiryChips.querySelectorAll(".chip").forEach(chip => {
+  chip.addEventListener("click", () => setExpiry(chip.dataset.minutes));
+});
 els.shareTTL.addEventListener("blur", () => ttlSecondsFrom(els.shareTTL));
-
-["dragenter", "dragover"].forEach(type => {
-  els.dropzone.addEventListener(type, event => {
+els.passwordToggle.addEventListener("change", () => setPasswordEnabled(els.passwordToggle.checked));
+els.passwordReveal.addEventListener("click", () => setPasswordRevealed(els.sharePassword.type === "password"));
+els.textInput.addEventListener("input", updateShareButton);
+els.textInput.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();
-    els.dropzone.classList.add("dragging");
-  });
+    els.shareForm.requestSubmit();
+  }
 });
 
-["dragleave", "drop"].forEach(type => {
-  els.dropzone.addEventListener(type, event => {
-    event.preventDefault();
-    els.dropzone.classList.remove("dragging");
-  });
+// Files can be dropped anywhere on the page, not only on the drop zone; a
+// miss would otherwise make the browser navigate away to the dropped file.
+function dragHasFiles(event) {
+  return Array.from((event.dataTransfer && event.dataTransfer.types) || []).includes("Files");
+}
+
+window.addEventListener("dragover", event => {
+  if (!dragHasFiles(event)) return;
+  event.preventDefault();
+  if (!els.homeView.hidden) els.shareForm.classList.add("dragging");
 });
 
-els.dropzone.addEventListener("drop", event => stageFiles(event.dataTransfer.files));
+window.addEventListener("dragleave", event => {
+  if (!event.relatedTarget) els.shareForm.classList.remove("dragging");
+});
+
+window.addEventListener("drop", event => {
+  if (!dragHasFiles(event)) return;
+  event.preventDefault();
+  els.shareForm.classList.remove("dragging");
+  if (els.homeView.hidden) return;
+  setComposeTab("files");
+  stageFiles(event.dataTransfer.files);
+});
+
+// Pasting a screenshot or copied file stages it just like dropping it.
+document.addEventListener("paste", event => {
+  const files = event.clipboardData && event.clipboardData.files;
+  if (els.homeView.hidden || !files || files.length === 0) return;
+  event.preventDefault();
+  setComposeTab("files");
+  stageFiles(files);
+});
 
 // Only the countdowns change from second to second. Update them in place so the
 // list keeps keyboard focus and in-progress clicks instead of being rebuilt.
@@ -795,6 +886,7 @@ function tickMeta() {
 setInterval(tickMeta, 1000);
 
 setComposeTab(state.composeTab);
+renderPendingFiles();
 loadLimits();
 loadItems()
   .then(renderRoute)

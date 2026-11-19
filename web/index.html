@@ -17,42 +17,83 @@
         <div class="status" id="connectionStatus">Connecting</div>
       </header>
 
-      <div class="compose-tabs" id="composeTabs" aria-label="Share type">
-        <button type="button" class="active" data-compose-tab="files">Files</button>
-        <button type="button" data-compose-tab="text">Text</button>
+      <div class="workspace" id="homeView">
+        <form class="composer" id="shareForm" novalidate>
+          <div class="segmented" id="composeTabs" role="group" aria-label="What do you want to share?">
+            <button type="button" class="active" data-compose-tab="files" aria-pressed="true">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+              Files
+            </button>
+            <button type="button" data-compose-tab="text" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+              Text
+            </button>
+          </div>
+
+          <div class="compose-panel" data-compose-panel="files">
+            <label class="dropzone" id="dropzone">
+              <input id="fileInput" type="file" multiple>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+              <span class="drop-title" id="dropTitle">Choose files</span>
+              <span class="drop-subtitle" id="dropSubtitle">Drop files here, paste, or click to browse</span>
+            </label>
+            <ul class="pending-files" id="pendingFiles" hidden></ul>
+          </div>
+
+          <div class="compose-panel" data-compose-panel="text" hidden>
+            <input id="textName" type="text" maxlength="120" placeholder="Title (optional)" aria-label="Title (optional)">
+            <textarea id="textInput" rows="7" placeholder="Paste or type text to share" aria-label="Text to share"></textarea>
+          </div>
+
+          <div class="option" role="group" aria-labelledby="expiryLabel">
+            <div class="option-title" id="expiryLabel">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              Delete after
+            </div>
+            <div class="chips" id="expiryChips">
+              <button type="button" class="chip active" data-minutes="5" aria-pressed="true">5 min</button>
+              <button type="button" class="chip" data-minutes="15" aria-pressed="false">15 min</button>
+              <button type="button" class="chip" data-minutes="60" aria-pressed="false">1 hour</button>
+              <button type="button" class="chip" data-minutes="360" aria-pressed="false">6 hours</button>
+              <button type="button" class="chip" data-minutes="1440" aria-pressed="false">24 hours</button>
+              <button type="button" class="chip" data-minutes="custom" aria-pressed="false">Custom</button>
+            </div>
+            <label class="custom-expiry" id="customExpiry" hidden>
+              <input id="shareTTL" type="number" min="1" max="1440" step="1" inputmode="numeric" value="5" aria-label="Minutes until deletion">
+              <span>minutes (1&ndash;1440)</span>
+            </label>
+          </div>
+
+          <div class="option">
+            <label class="switch-row">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+              <span class="switch-text">
+                <strong>Password protection</strong>
+                <small>Ask for a password before opening</small>
+              </span>
+              <input id="passwordToggle" type="checkbox" role="switch">
+              <span class="switch" aria-hidden="true"></span>
+            </label>
+            <div class="password-field" id="passwordField" hidden>
+              <input id="sharePassword" type="password" autocomplete="new-password" placeholder="Choose a password" aria-label="Password">
+              <button type="button" class="secondary" id="passwordReveal" aria-pressed="false">Show</button>
+            </div>
+          </div>
+
+          <button type="submit" class="share-button" id="shareButton" disabled>Share files</button>
+        </form>
+
+        <section class="shared">
+          <div class="list-head" id="listHead">
+            <h2>Available now</h2>
+            <p id="itemCount">0 items</p>
+          </div>
+
+          <div class="items" id="items" aria-live="polite">
+            <div class="empty">Nothing shared yet.</div>
+          </div>
+        </section>
       </div>
-
-      <section class="compose" id="composeView">
-        <div class="share-options">
-          <label>
-            <span>Expires after</span>
-            <span class="number-unit">
-              <input id="shareTTL" type="number" min="1" max="1440" step="1" inputmode="numeric" value="5">
-              <span>min</span>
-            </span>
-          </label>
-          <label>
-            <span>Password</span>
-            <input id="sharePassword" type="password" autocomplete="off" placeholder="Optional password">
-          </label>
-        </div>
-
-        <form class="file-share" id="fileForm" data-compose-panel="files">
-          <label class="dropzone" id="dropzone">
-            <input id="fileInput" type="file" multiple>
-            <span class="drop-title" id="dropTitle">Choose files</span>
-            <span class="drop-subtitle" id="dropSubtitle">Tap, click, or drop files, then share</span>
-          </label>
-          <ul class="pending-files" id="pendingFiles" hidden></ul>
-          <button type="submit" id="shareFilesButton">Share Files</button>
-        </form>
-
-        <form class="text-share" id="textForm" data-compose-panel="text">
-          <input id="textName" type="text" maxlength="120" placeholder="Optional text name">
-          <textarea id="textInput" rows="7" placeholder="Paste raw text"></textarea>
-          <button type="submit">Share Text</button>
-        </form>
-      </section>
 
       <section class="detail" id="detailView" hidden>
         <div class="detail-bar">
@@ -65,15 +106,6 @@
         </div>
         <div class="item-meta detail-meta" id="detailMeta"></div>
         <div class="preview" id="previewArea"></div>
-      </section>
-
-      <section class="list-head" id="listHead">
-        <h2>Available now</h2>
-        <p id="itemCount">0 items</p>
-      </section>
-
-      <section class="items" id="items" aria-live="polite">
-        <div class="empty">Nothing shared yet.</div>
       </section>
     </main>
 
