@@ -24,6 +24,9 @@ import (
 	"unicode"
 )
 
+// eventKeepAliveInterval is how often idle event streams get a comment line.
+var eventKeepAliveInterval = 25 * time.Second
+
 var errBlankPassword = errors.New("password must not be only whitespace")
 
 const (
@@ -579,6 +582,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	ch := s.subscribe()
 	defer s.unsubscribe(ch)
@@ -586,8 +590,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	writeSSE(w, "connected", "ready")
 	flusher.Flush()
 
+	keepAlive := time.NewTicker(eventKeepAliveInterval)
+	defer keepAlive.Stop()
+
 	for {
 		select {
+		case <-keepAlive.C:
+			// A comment line keeps idle connections from being dropped by
+			// proxies and lets us notice clients that vanished silently.
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case reason := <-ch:
 			writeSSE(w, "items_changed", reason)
 			flusher.Flush()

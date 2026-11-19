@@ -625,6 +625,38 @@ func TestSSEEmitsItemChange(t *testing.T) {
 	waitForEvent(t, events, "items_changed")
 }
 
+func TestSSESendsKeepAlive(t *testing.T) {
+	previous := eventKeepAliveInterval
+	eventKeepAliveInterval = 20 * time.Millisecond
+	defer func() { eventKeepAliveInterval = previous }()
+
+	srv, _ := newTestServer(t, 5*time.Minute)
+	httpSrv := httptest.NewServer(srv.Routes())
+	defer httpSrv.Close()
+
+	resp, err := http.Get(httpSrv.URL + "/api/events")
+	if err != nil {
+		t.Fatalf("open events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	found := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			if strings.HasPrefix(scanner.Text(), ": keepalive") {
+				close(found)
+				return
+			}
+		}
+	}()
+	select {
+	case <-found:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no keepalive comment received")
+	}
+}
+
 type testUploadOptions struct {
 	TTLSeconds int64
 	Password   string
