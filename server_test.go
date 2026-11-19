@@ -398,6 +398,44 @@ func TestExpiryRemovesItemAndRejectsDownload(t *testing.T) {
 	}
 }
 
+func TestFailedUploadDoesNotLeaveStoredFilesBehind(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "first.txt")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	_, _ = part.Write([]byte("stored before the failure"))
+	// An invalid option after a stored file makes the whole request fail.
+	_ = writer.WriteField("ttlSeconds", "not-a-number")
+	_ = writer.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/items/files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("upload status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	srv.mu.RLock()
+	remaining := len(srv.items)
+	srv.mu.RUnlock()
+	if remaining != 0 {
+		t.Fatalf("failed upload left %d item(s) behind", remaining)
+	}
+	entries, err := os.ReadDir(srv.tempDir)
+	if err != nil {
+		t.Fatalf("read temp dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed upload left %d temp file(s) behind", len(entries))
+	}
+}
+
 func TestSSEEmitsItemChange(t *testing.T) {
 	srv, _ := newTestServer(t, 5*time.Minute)
 	httpSrv := httptest.NewServer(srv.Routes())

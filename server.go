@@ -211,6 +211,18 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	created := make([]itemDTO, 0)
+	committed := false
+	defer func() {
+		// A failed request must not leave half of a multi-file upload behind,
+		// since the client only sees an error and cannot know what was stored.
+		if committed {
+			return
+		}
+		for _, dto := range created {
+			s.deleteItem(dto.ID)
+		}
+	}()
+
 	options := shareOptions{TTL: s.ttl}
 	for {
 		part, err := reader.NextPart()
@@ -260,6 +272,7 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	committed = true
 	s.broadcast("created")
 	writeJSON(w, http.StatusCreated, created)
 }
