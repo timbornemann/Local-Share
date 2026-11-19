@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -131,6 +132,10 @@ type Server struct {
 	subsMu      sync.Mutex
 	subscribers map[chan string]struct{}
 
+	// Unlock attempts are limited per item and client, and per item overall.
+	unlockByClient *failureLimiter
+	unlockByItem   *failureLimiter
+
 	stopOnce sync.Once
 	stopping chan struct{}
 }
@@ -186,6 +191,8 @@ func NewServer(cfg Config) (*Server, error) {
 		items:           make(map[string]*item),
 		subscribers:     make(map[chan string]struct{}),
 		stopping:        make(chan struct{}),
+		unlockByClient:  newFailureLimiter(5, time.Minute),
+		unlockByItem:    newFailureLimiter(60, 5*time.Minute),
 	}, nil
 }
 
@@ -558,6 +565,15 @@ func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	now := s.now().UTC()
+	clientKey := id + "|" + clientAddr(r)
+	wait := max(s.unlockByClient.retryAfter(clientKey, now), s.unlockByItem.retryAfter(id, now))
+	if wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait/time.Second)+1))
+		http.Error(w, fmt.Sprintf("too many wrong passwords, try again in %d seconds", int(wait/time.Second)+1), http.StatusTooManyRequests)
+		return
+	}
+
 	token, expiresAt, status, err := s.createAccessToken(id, req.Password)
 	if err != nil {
 		http.Error(w, "could not unlock item", http.StatusInternalServerError)
@@ -565,6 +581,7 @@ func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request, id string)
 	}
 	switch status {
 	case http.StatusOK:
+		s.unlockByClient.reset(clientKey)
 		writeJSON(w, http.StatusOK, struct {
 			Token     string    `json:"token"`
 			ExpiresAt time.Time `json:"expiresAt"`
@@ -574,6 +591,8 @@ func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request, id string)
 	case http.StatusBadRequest:
 		http.Error(w, "item is not password protected", http.StatusBadRequest)
 	default:
+		s.unlockByClient.recordFailure(clientKey, now)
+		s.unlockByItem.recordFailure(id, now)
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 	}
 }
@@ -812,18 +831,31 @@ func (s *Server) requireReadableItem(w http.ResponseWriter, r *http.Request, id 
 func (s *Server) createAccessToken(id, password string) (string, time.Time, int, error) {
 	now := s.now().UTC()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// Verifying a password is deliberately slow, so do it without holding the
+	// lock that every other request needs.
+	s.mu.RLock()
 	it, ok := s.items[id]
 	if !ok || !it.ExpiresAt.After(now) {
+		s.mu.RUnlock()
 		return "", time.Time{}, http.StatusNotFound, nil
 	}
 	if !isProtectedItem(it) {
+		s.mu.RUnlock()
 		return "", time.Time{}, http.StatusBadRequest, nil
 	}
-	if !passwordMatches(it, password) {
+	salt := append([]byte(nil), it.PasswordSalt...)
+	want := append([]byte(nil), it.PasswordHash...)
+	s.mu.RUnlock()
+
+	if !passwordMatches(salt, want, password) {
 		return "", time.Time{}, http.StatusUnauthorized, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	it, ok = s.items[id]
+	if !ok || !it.ExpiresAt.After(now) {
+		return "", time.Time{}, http.StatusNotFound, nil
 	}
 
 	token, err := randomID()
@@ -956,6 +988,8 @@ func (q *quotaWriter) Write(p []byte) (int, error) {
 
 func (s *Server) cleanupExpired() bool {
 	now := s.now().UTC()
+	s.unlockByClient.prune(now)
+	s.unlockByItem.prune(now)
 	var paths []string
 
 	s.mu.Lock()
@@ -1104,20 +1138,28 @@ func newPasswordDigest(password string) ([]byte, []byte, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return nil, nil, err
 	}
-	return salt, hashPassword(salt, password), nil
-}
-
-func hashPassword(salt []byte, password string) []byte {
-	sum := sha256.Sum256(append(append([]byte(nil), salt...), []byte(strings.TrimSpace(password))...))
-	return sum[:]
-}
-
-func passwordMatches(it *item, password string) bool {
-	if !isProtectedItem(it) {
-		return true
+	hash, err := hashPassword(salt, password)
+	if err != nil {
+		return nil, nil, err
 	}
-	got := hashPassword(it.PasswordSalt, password)
-	return subtle.ConstantTimeCompare(got, it.PasswordHash) == 1
+	return salt, hash, nil
+}
+
+// passwordIterations makes every password guess cost real CPU time. The hashes
+// only live in memory, but a slow KDF also throttles online guessing and keeps
+// a leaked process dump from being cheap to crack.
+const passwordIterations = 120_000
+
+func hashPassword(salt []byte, password string) ([]byte, error) {
+	return pbkdf2.Key(sha256.New, strings.TrimSpace(password), salt, passwordIterations, sha256.Size)
+}
+
+func passwordMatches(salt, want []byte, password string) bool {
+	got, err := hashPassword(salt, password)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
 func isProtectedItem(it *item) bool {

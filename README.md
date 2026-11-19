@@ -69,7 +69,7 @@ or:
 
 - The app is intentionally open to the local network.
 - The default lifetime is 5 minutes. The UI allows 1 to 1440 minutes per share.
-- Optional passwords hide preview/download/copy until unlocked in the browser. Password hashes and metadata stay in memory only; temporary files are not encrypted on disk.
+- Optional passwords hide preview/download/copy until unlocked in the browser. Password hashes and metadata stay in memory only; temporary files are not encrypted on disk. Passwords are stored as salted PBKDF2-SHA256 hashes, and repeated wrong passwords lock unlocking out (5 failures per client and item for 1 minute, 60 per item for 5 minutes; answered with `429` and `Retry-After`).
 - Uploads are streamed to temporary files under `/tmp/local-share` in the container.
 - Upload limits protect the host from being filled up. Defaults: 1024 MB per file, 2048 MB across all active shares, 200 active shares, 5 MB per text share. Change them with `LOCAL_SHARE_MAX_FILE_MB`, `LOCAL_SHARE_MAX_TOTAL_MB`, `LOCAL_SHARE_MAX_ITEMS` and `LOCAL_SHARE_MAX_TEXT_MB`; `0` disables a limit. Oversized uploads are rejected with `413`, a full store or too many shares with `507`.
 - Restarting the container clears all shares.

@@ -1142,3 +1142,82 @@ func TestConfigEndpointExposesLimits(t *testing.T) {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }
+
+func unlockFrom(handler http.Handler, remoteAddr, id, password string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/items/"+id+"/unlock", strings.NewReader(`{"password":`+quote(password)+`}`))
+	req.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestUnlockLocksOutRepeatedWrongPasswords(t *testing.T) {
+	srv, clock := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	created := createTextWithOptions(t, handler, "secret.txt", "classified", 0, "correct horse")
+
+	for i := 0; i < 5; i++ {
+		if rec := unlockFrom(handler, "10.0.0.5:1111", created.ID, "wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d", i+1, rec.Code)
+		}
+	}
+	rec := unlockFrom(handler, "10.0.0.5:2222", created.ID, "correct horse")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked-out client status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("lockout should say when to retry")
+	}
+
+	// Another machine is not affected by the lockout.
+	if rec := unlockFrom(handler, "10.0.0.6:3333", created.ID, "correct horse"); rec.Code != http.StatusOK {
+		t.Fatalf("other client status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	clock.Advance(2 * time.Minute)
+	if rec := unlockFrom(handler, "10.0.0.5:4444", created.ID, "correct horse"); rec.Code != http.StatusOK {
+		t.Fatalf("status after lockout expired = %d", rec.Code)
+	}
+}
+
+func TestSuccessfulUnlockResetsFailureCount(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	created := createTextWithOptions(t, handler, "secret.txt", "classified", 0, "pw-123")
+
+	for round := 0; round < 3; round++ {
+		for i := 0; i < 4; i++ {
+			unlockFrom(handler, "10.0.0.5:1", created.ID, "wrong")
+		}
+		if rec := unlockFrom(handler, "10.0.0.5:1", created.ID, "pw-123"); rec.Code != http.StatusOK {
+			t.Fatalf("round %d unlock status = %d", round, rec.Code)
+		}
+	}
+}
+
+func TestUnlockLockoutPerItemAcrossClients(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	created := createTextWithOptions(t, handler, "secret.txt", "classified", 0, "pw-123")
+
+	for i := 0; i < 60; i++ {
+		unlockFrom(handler, fmt.Sprintf("10.0.%d.%d:1", i/200, i%200), created.ID, "wrong")
+	}
+	if rec := unlockFrom(handler, "10.9.9.9:1", created.ID, "pw-123"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("distributed guessing should lock the item, status = %d", rec.Code)
+	}
+}
+
+func TestPasswordIsStoredAsSlowSaltedHash(t *testing.T) {
+	salt1, hash1, err := newPasswordDigest("hunter22")
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	salt2, hash2, _ := newPasswordDigest("hunter22")
+	if bytes.Equal(salt1, salt2) || bytes.Equal(hash1, hash2) {
+		t.Fatalf("equal passwords must not produce equal digests")
+	}
+	if !passwordMatches(salt1, hash1, "  hunter22 ") || passwordMatches(salt1, hash1, "hunter23") {
+		t.Fatalf("password verification is wrong")
+	}
+}
