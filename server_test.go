@@ -37,6 +37,7 @@ func newTestServer(t *testing.T, ttl time.Duration) (*Server, *testClock) {
 		CleanupInterval: time.Hour,
 		StaticFS:        webFS,
 		Now:             clock.Now,
+		AllowedHosts:    []string{"*"}, // httptest requests use Host example.com
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -853,5 +854,135 @@ func waitForEvent(t *testing.T, events <-chan string, want string) {
 		case <-timer.C:
 			t.Fatalf("timed out waiting for SSE event %q", want)
 		}
+	}
+}
+
+func TestInlineViewDoesNotTrustUploaderContentType(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	cases := []struct{ name, claimed, want string }{
+		{"photo.png", "application/octet-stream", "image/png"},
+		{"doc.pdf", "application/octet-stream", "application/pdf"},
+	}
+	for _, tc := range cases {
+		item := uploadFileWithContentType(t, handler, tc.name, tc.claimed, []byte("data"))
+		req := httptest.NewRequest(http.MethodGet, "/api/items/"+item.ID+"/view", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s view status = %d", tc.name, rec.Code)
+		}
+		if got := rec.Header().Get("Content-Type"); got != tc.want {
+			t.Errorf("%s served as %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestHostAllowlist(t *testing.T) {
+	cases := []struct {
+		host  string
+		extra []string
+		want  bool
+	}{
+		{"localhost:8080", nil, true},
+		{"127.0.0.1:8080", nil, true},
+		{"192.168.1.20", nil, true},
+		{"[::1]:8080", nil, true},
+		{"[fe80::1]", nil, true},
+		{"my-pc", nil, true},
+		{"my-pc.local:8080", nil, true},
+		{"nas.lan", nil, true},
+		{"evil.example.com", nil, false},
+		{"evil.example.com:8080", nil, false},
+		{"", nil, false},
+		{"share.example.com", []string{"share.example.com"}, true},
+		{"a.example.com", []string{"*.example.com"}, true},
+		{"example.com", []string{"*.example.com"}, false},
+		{"anything.test", []string{"*"}, true},
+	}
+	for _, tc := range cases {
+		if got := hostAllowed(tc.host, tc.extra); got != tc.want {
+			t.Errorf("hostAllowed(%q, %v) = %v, want %v", tc.host, tc.extra, got, tc.want)
+		}
+	}
+}
+
+func newStrictTestServer(t *testing.T) http.Handler {
+	t.Helper()
+	srv, err := NewServer(Config{TempDir: t.TempDir(), CleanupInterval: time.Hour, StaticFS: webFS})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return srv.Routes()
+}
+
+func TestRebindingHostIsRejected(t *testing.T) {
+	handler := newStrictTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/items", nil)
+	req.Host = "attacker.example.com:8080"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign host status = %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/items", nil)
+	req.Host = "192.168.1.20:8080"
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LAN host status = %d", rec.Code)
+	}
+}
+
+func TestCrossSitePostsAreRejected(t *testing.T) {
+	handler := newStrictTestServer(t)
+	post := func(headers map[string]string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/items/text", strings.NewReader(`{"text":"hello"}`))
+		req.Host = "192.168.1.20:8080"
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := post(map[string]string{"Origin": "https://evil.example.com"}); got != http.StatusForbidden {
+		t.Fatalf("cross-origin POST status = %d", got)
+	}
+	if got := post(map[string]string{"Origin": "null"}); got != http.StatusForbidden {
+		t.Fatalf("null-origin POST status = %d", got)
+	}
+	if got := post(map[string]string{"Sec-Fetch-Site": "cross-site"}); got != http.StatusForbidden {
+		t.Fatalf("cross-site fetch-metadata POST status = %d", got)
+	}
+	if got := post(map[string]string{"Origin": "http://192.168.1.20:8080", "Sec-Fetch-Site": "same-origin"}); got != http.StatusCreated {
+		t.Fatalf("same-origin POST status = %d", got)
+	}
+	if got := post(nil); got != http.StatusCreated {
+		t.Fatalf("non-browser POST status = %d", got)
+	}
+}
+
+func TestAppResponsesCarrySecurityHeaders(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	for _, path := range []string{"/", "/api/items", "/static/app.js"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, req)
+		h := rec.Header()
+		if h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" ||
+			h.Get("X-Frame-Options") != "SAMEORIGIN" || !strings.Contains(h.Get("Content-Security-Policy"), "default-src 'none'") {
+			t.Errorf("%s is missing security headers: %v", path, h)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/items", nil)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("API responses must not be cached")
 	}
 }

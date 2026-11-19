@@ -24,6 +24,7 @@ func main() {
 		TTL:             5 * time.Minute,
 		CleanupInterval: 5 * time.Second,
 		StaticFS:        webFS,
+		AllowedHosts:    splitList(os.Getenv("LOCAL_SHARE_ALLOWED_HOSTS")),
 	}
 
 	app, err := NewServer(cfg)
@@ -39,6 +40,10 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           app.Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// No read/write timeout: uploads and downloads of large files are
+		// legitimately slow. Idle keep-alive connections are still reaped.
+		IdleTimeout:    2 * time.Minute,
+		MaxHeaderBytes: 64 << 10,
 	}
 	// Open event streams never become idle, so they must be told to stop or
 	// Shutdown would wait for its full timeout.
@@ -74,6 +79,17 @@ func listenURL(addr string) string {
 		return "http://0.0.0.0" + addr
 	}
 	return "http://" + addr
+}
+
+// splitList splits a comma separated environment value, dropping empty items.
+func splitList(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func env(key, fallback string) string {

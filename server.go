@@ -42,6 +42,10 @@ type Config struct {
 	CleanupInterval time.Duration
 	StaticFS        fs.FS
 	Now             func() time.Time
+
+	// AllowedHosts lists extra Host header values accepted besides IP
+	// addresses, localhost and local-only names. See hostAllowed.
+	AllowedHosts []string
 }
 
 type item struct {
@@ -83,6 +87,7 @@ type Server struct {
 	now             func() time.Time
 	indexHTML       []byte
 	staticHandler   http.Handler
+	allowedHosts    []string
 
 	mu    sync.RWMutex
 	items map[string]*item
@@ -131,6 +136,7 @@ func NewServer(cfg Config) (*Server, error) {
 		now:             cfg.Now,
 		indexHTML:       indexHTML,
 		staticHandler:   http.FileServer(http.FS(static)),
+		allowedHosts:    cfg.AllowedHosts,
 		items:           make(map[string]*item),
 		subscribers:     make(map[chan string]struct{}),
 		stopping:        make(chan struct{}),
@@ -191,7 +197,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/items", s.handleListItems)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/", s.handleIndex)
-	return mux
+	return s.secure(mux)
 }
 
 func (s *Server) RunCleanup(ctx context.Context) {
@@ -544,8 +550,19 @@ func (s *Server) handleView(w http.ResponseWriter, r *http.Request, id string) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	if kind == "text" {
+	switch kind {
+	case "text":
 		contentType = "text/plain; charset=utf-8"
+	case "pdf":
+		contentType = "application/pdf"
+	default:
+		// The type is chosen by the uploader. Only pass it through inline when it
+		// really is of the previewed family; otherwise derive it from the name.
+		if mediaType, _, err := mime.ParseMediaType(contentType); err != nil || !strings.HasPrefix(strings.ToLower(mediaType), kind+"/") {
+			if guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(it.Name))); strings.HasPrefix(guessed, kind+"/") {
+				contentType = guessed
+			}
+		}
 	}
 	setContentHeaders(w, contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", it.Size))
@@ -561,11 +578,16 @@ func setContentHeaders(w http.ResponseWriter, contentType string) {
 	h.Set("Content-Type", contentType)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
-	// SVG can carry scripts. Opening one directly would run them with the
-	// app's origin, so lock the document down; <img> rendering is unaffected.
-	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil && strings.EqualFold(mediaType, "image/svg+xml") {
-		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+	// Stored files must never run anything in the app's origin, whatever their
+	// type claims to be (SVG and HTML can carry scripts). Opening one directly
+	// gets an empty, sandboxed document; <img>/<video> rendering is unaffected.
+	// PDFs are the exception: Chrome's viewer does not work inside a sandbox,
+	// and PDF scripts do not run in the page's origin anyway.
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil && strings.EqualFold(mediaType, "application/pdf") {
+		h.Set("Content-Security-Policy", "frame-ancestors 'self'")
+		return
 	}
+	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'")
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
