@@ -436,6 +436,38 @@ func TestFailedUploadDoesNotLeaveStoredFilesBehind(t *testing.T) {
 	}
 }
 
+func TestStoredContentIsServedWithHardenedHeaders(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	svg := uploadFileWithContentType(t, handler, "logo.svg", "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`))
+
+	for _, route := range []string{"/view", "/download"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/items/"+svg.ID+route, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", route, rec.Code)
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("%s X-Content-Type-Options = %q", route, got)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s Cache-Control = %q", route, got)
+		}
+		if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") {
+			t.Fatalf("%s should sandbox SVG, CSP = %q", route, got)
+		}
+	}
+
+	text := createText(t, handler, "note.txt", "plain")
+	req := httptest.NewRequest(http.MethodGet, "/api/items/"+text.ID+"/raw", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("raw text is missing hardened headers: %v", rec.Header())
+	}
+}
+
 func TestBlankPasswordIsRejected(t *testing.T) {
 	srv, _ := newTestServer(t, 5*time.Minute)
 	handler := srv.Routes()

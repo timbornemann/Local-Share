@@ -455,7 +455,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request, id strin
 	if !attachment {
 		contentType = "text/plain; charset=utf-8"
 	}
-	w.Header().Set("Content-Type", contentType)
+	setContentHeaders(w, contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", it.Size))
 	if attachment {
 		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{
@@ -494,9 +494,25 @@ func (s *Server) handleView(w http.ResponseWriter, r *http.Request, id string) {
 	if kind == "text" {
 		contentType = "text/plain; charset=utf-8"
 	}
-	w.Header().Set("Content-Type", contentType)
+	setContentHeaders(w, contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", it.Size))
 	http.ServeContent(w, r, it.Name, it.CreatedAt, file)
+}
+
+// setContentHeaders sets the headers shared by every response that serves
+// stored user content. Uploaded files are untrusted: they are served from the
+// app's own origin, so they must never be sniffed into something executable,
+// and protected content must not end up in browser or proxy caches.
+func setContentHeaders(w http.ResponseWriter, contentType string) {
+	h := w.Header()
+	h.Set("Content-Type", contentType)
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Cache-Control", "no-store")
+	// SVG can carry scripts. Opening one directly would run them with the
+	// app's origin, so lock the document down; <img> rendering is unaffected.
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil && strings.EqualFold(mediaType, "image/svg+xml") {
+		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+	}
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
