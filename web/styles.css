@@ -9,6 +9,7 @@
   --green: #137a4a;
   --red: #b42318;
   --amber: #9a6700;
+  --radius: 2px;
   --shadow: 0 18px 45px rgba(23, 33, 27, 0.1);
 }
 
@@ -86,7 +87,7 @@ h1 {
 .status {
   min-width: 128px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 9px 12px;
   background: var(--panel);
   color: var(--amber);
@@ -120,7 +121,7 @@ h1 {
   gap: 18px;
   padding: 16px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--panel);
   box-shadow: var(--shadow);
   transition: border-color 140ms ease;
@@ -147,7 +148,7 @@ h1 {
   gap: 4px;
   padding: 4px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: #edf0eb;
 }
 
@@ -180,7 +181,7 @@ h1 {
   gap: 6px;
   min-height: 176px;
   border: 1px dashed #b7c6bb;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: #fbfcfa;
   padding: 24px 16px;
   cursor: pointer;
@@ -244,7 +245,7 @@ h1 {
   gap: 10px;
   align-items: center;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: #fbfcfa;
   padding: 8px 10px;
 }
@@ -292,7 +293,7 @@ h1 {
 .chip {
   min-height: 38px;
   border-color: var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius);
   padding: 6px 14px;
   background: #fbfcfa;
   color: var(--ink);
@@ -319,7 +320,7 @@ h1 {
   align-items: center;
   gap: 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: #fbfcfa;
   padding: 12px;
   cursor: pointer;
@@ -366,7 +367,7 @@ h1 {
   flex: none;
   width: 44px;
   height: 26px;
-  border-radius: 999px;
+  border-radius: var(--radius);
   background: #c3ccc6;
   transition: background-color 140ms ease;
 }
@@ -378,7 +379,7 @@ h1 {
   left: 3px;
   width: 20px;
   height: 20px;
-  border-radius: 50%;
+  border-radius: var(--radius);
   background: #fff;
   box-shadow: 0 1px 3px rgba(23, 33, 27, 0.3);
   transition: transform 140ms ease;
@@ -427,7 +428,7 @@ textarea {
   width: 100%;
   min-height: 46px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: #fbfcfa;
   color: var(--ink);
   padding: 12px;
@@ -448,7 +449,7 @@ button,
 .button-link {
   min-height: 44px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 9px 13px;
   background: var(--ink);
   color: #fff;
@@ -511,7 +512,7 @@ button.danger {
 .empty,
 .item {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--panel);
 }
 
@@ -556,7 +557,7 @@ button.danger {
 
 .badge {
   flex: 0 0 auto;
-  border-radius: 999px;
+  border-radius: var(--radius);
   padding: 4px 8px;
   background: #e7f5ee;
   color: var(--green);
@@ -597,7 +598,7 @@ button.danger {
 
 .detail {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--panel);
   box-shadow: var(--shadow);
   padding: 16px;
@@ -637,7 +638,7 @@ button.danger {
 .preview {
   min-height: 280px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: #fbfcfa;
   overflow: hidden;
 }
@@ -704,7 +705,7 @@ button.danger {
   right: 18px;
   bottom: max(18px, env(safe-area-inset-bottom));
   max-width: min(360px, calc(100vw - 36px));
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 12px 14px;
   background: var(--ink);
   color: white;
