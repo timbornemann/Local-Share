@@ -86,6 +86,9 @@ type Server struct {
 
 	subsMu      sync.Mutex
 	subscribers map[chan string]struct{}
+
+	stopOnce sync.Once
+	stopping chan struct{}
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -107,6 +110,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if err := os.MkdirAll(cfg.TempDir, 0o700); err != nil {
 		return nil, err
 	}
+	removeStaleFiles(cfg.TempDir, cfg.Now().Add(-maxShareTTL))
 
 	static, err := fs.Sub(cfg.StaticFS, "web")
 	if err != nil {
@@ -126,7 +130,53 @@ func NewServer(cfg Config) (*Server, error) {
 		staticHandler:   http.FileServer(http.FS(static)),
 		items:           make(map[string]*item),
 		subscribers:     make(map[chan string]struct{}),
+		stopping:        make(chan struct{}),
 	}, nil
+}
+
+// StopEvents ends all open event streams. Without it a connected browser tab
+// would keep graceful shutdown waiting until its timeout.
+func (s *Server) StopEvents() {
+	s.stopOnce.Do(func() { close(s.stopping) })
+}
+
+// Close ends event streams and deletes every stored file. Shares only live in
+// memory, so their files are unreachable after shutdown and must not be left
+// behind on disk.
+func (s *Server) Close() {
+	s.StopEvents()
+
+	s.mu.Lock()
+	paths := make([]string, 0, len(s.items))
+	for id, it := range s.items {
+		paths = append(paths, it.Path)
+		delete(s.items, id)
+	}
+	s.mu.Unlock()
+
+	for _, p := range paths {
+		_ = os.Remove(p)
+	}
+}
+
+// removeStaleFiles deletes share files left behind by an earlier run that did
+// not shut down cleanly. Nothing can outlive maxShareTTL, so anything older
+// than that is unreachable no matter which instance created it.
+func removeStaleFiles(dir string, cutoff time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "share-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -542,6 +592,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			writeSSE(w, "items_changed", reason)
 			flusher.Flush()
 		case <-r.Context().Done():
+			return
+		case <-s.stopping:
 			return
 		}
 	}

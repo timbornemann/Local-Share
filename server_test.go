@@ -436,6 +436,74 @@ func TestFailedUploadDoesNotLeaveStoredFilesBehind(t *testing.T) {
 	}
 }
 
+func TestCloseRemovesStoredFilesAndStopsEventStreams(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+	createText(t, handler, "one", "first")
+	uploadFiles(t, handler, map[string][]byte{"two.bin": {1, 2, 3}})
+
+	httpSrv := httptest.NewServer(handler)
+	defer httpSrv.Close()
+	resp, err := http.Get(httpSrv.URL + "/api/events")
+	if err != nil {
+		t.Fatalf("open events: %v", err)
+	}
+	defer resp.Body.Close()
+	streamEnded := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		close(streamEnded)
+	}()
+
+	srv.Close()
+	srv.Close() // must be safe to call more than once
+
+	select {
+	case <-streamEnded:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("event stream should end when the server closes")
+	}
+	entries, err := os.ReadDir(srv.tempDir)
+	if err != nil {
+		t.Fatalf("read temp dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Close left %d file(s) behind", len(entries))
+	}
+}
+
+func TestNewServerRemovesStaleShareFiles(t *testing.T) {
+	dir := t.TempDir()
+	old := dir + string(os.PathSeparator) + "share-old"
+	recent := dir + string(os.PathSeparator) + "share-recent"
+	other := dir + string(os.PathSeparator) + "keep-me.txt"
+	for _, p := range []string{old, recent, other} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	now := time.Now()
+	if err := os.Chtimes(old, now, now.Add(-maxShareTTL-time.Hour)); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if err := os.Chtimes(other, now, now.Add(-maxShareTTL-time.Hour)); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if _, err := NewServer(Config{TempDir: dir, StaticFS: webFS}); err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("stale share file should be removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Fatalf("recent share file must be kept: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("unrelated file must be kept: %v", err)
+	}
+}
+
 func TestStoredContentIsServedWithHardenedHeaders(t *testing.T) {
 	srv, _ := newTestServer(t, 5*time.Minute)
 	handler := srv.Routes()
