@@ -55,7 +55,7 @@ or:
 - `GET /` opens the browser UI.
 - `GET /api/items` lists active shares, including `protected`, `previewable`, and `previewKind` metadata.
 - `GET /api/items/{id}` returns metadata for one active share.
-- `POST /api/items/files` accepts multipart uploads with repeated `files` fields. Optional form fields: `ttlSeconds` and `password`.
+- `POST /api/items/files` accepts multipart uploads with repeated `files` fields. Optional form fields `ttlSeconds` and `password` apply to all files and must be sent before the first `files` field. A password must not consist only of whitespace.
 - `POST /api/items/text` accepts JSON: `{ "text": "...", "name": "optional", "ttlSeconds": 300, "password": "optional" }`.
 - `POST /api/items/{id}/unlock` accepts JSON `{ "password": "..." }` and returns `{ "token": "...", "expiresAt": "..." }` for protected shares.
 - `GET /api/items/{id}/download` downloads a file or text item. Protected items require `?token=...` or `X-Share-Token`.

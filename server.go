@@ -24,6 +24,8 @@ import (
 	"unicode"
 )
 
+var errBlankPassword = errors.New("password must not be only whitespace")
+
 const (
 	kindFile    = "file"
 	kindText    = "text"
@@ -240,8 +242,19 @@ func (s *Server) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid upload option", http.StatusBadRequest)
 				return
 			}
-			switch part.FormName() {
+			name := part.FormName()
+			if (name == "password" || name == "ttlSeconds") && len(created) > 0 {
+				// Options only apply to files that follow them. Accepting them
+				// late would silently leave earlier files unprotected.
+				http.Error(w, name+" must be sent before files", http.StatusBadRequest)
+				return
+			}
+			switch name {
 			case "password":
+				if err := validatePassword(value); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				options.Password = value
 			case "ttlSeconds":
 				ttl, err := parseTTLSeconds(value, s.ttl)
@@ -296,6 +309,11 @@ func (s *Server) handleCreateText(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.Text) == "" {
 		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := validatePassword(req.Password); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -851,7 +869,17 @@ func readSmallPart(reader io.Reader) (string, error) {
 	if len(data) > maxOptionBytes {
 		return "", errors.New("upload option is too large")
 	}
-	return strings.TrimSpace(string(data)), nil
+	return string(data), nil
+}
+
+// validatePassword rejects passwords that consist only of whitespace. They are
+// trimmed to nothing when hashed, which would silently create an unprotected
+// share even though the sender asked for a password.
+func validatePassword(password string) error {
+	if password != "" && strings.TrimSpace(password) == "" {
+		return errBlankPassword
+	}
+	return nil
 }
 
 func parseTTLSeconds(value string, fallback time.Duration) (time.Duration, error) {

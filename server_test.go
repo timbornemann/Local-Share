@@ -436,6 +436,65 @@ func TestFailedUploadDoesNotLeaveStoredFilesBehind(t *testing.T) {
 	}
 }
 
+func TestBlankPasswordIsRejected(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/items/text", strings.NewReader(`{"text":"hi","password":"   "}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("text with blank password status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("password", "  ")
+	part, _ := writer.CreateFormFile("files", "a.txt")
+	_, _ = part.Write([]byte("data"))
+	_ = writer.Close()
+	req = httptest.NewRequest(http.MethodPost, "/api/items/files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("upload with blank password status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	if len(srv.items) != 0 {
+		t.Fatalf("rejected requests created %d item(s)", len(srv.items))
+	}
+}
+
+func TestUploadOptionsAfterFilesAreRejected(t *testing.T) {
+	srv, _ := newTestServer(t, 5*time.Minute)
+	handler := srv.Routes()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, _ := writer.CreateFormFile("files", "a.txt")
+	_, _ = part.Write([]byte("data"))
+	_ = writer.WriteField("password", "late-secret")
+	_ = writer.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/items/files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("late password status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	if len(srv.items) != 0 {
+		t.Fatalf("rejected upload left %d item(s) behind", len(srv.items))
+	}
+}
+
 func TestSSEEmitsItemChange(t *testing.T) {
 	srv, _ := newTestServer(t, 5*time.Minute)
 	httpSrv := httptest.NewServer(srv.Routes())
